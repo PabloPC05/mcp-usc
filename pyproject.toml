@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-usc"
+version = "0.1.0"
+description = "HTTP-first MCP server for USC Moodle and public exam schedules"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "PabloPC05" }]
+dependencies = [
+  "beautifulsoup4>=4.13,<5",
+  "httpx>=0.28,<1",
+  "keyring>=25.6,<26",
+  "mcp>=1.27,<2",
+  "platformdirs>=4.3,<5",
+  "pypdf>=5,<7",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+browser-auth = ["playwright>=1.55,<2"]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+mcp-usc = "mcp_usc.cli:main"
+mcp-usc-login = "mcp_usc.cli:login_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_usc"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

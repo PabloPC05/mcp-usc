@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+logs/
+
+# Never commit browser profiles, cookies, tokens, or local configuration.
+.mcp-usc/
+browser-profile/
+*.token
