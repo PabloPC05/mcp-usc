@@ -86,46 +86,33 @@ def _service_with(gateway: FakeSessionGateway) -> UscService:
     return service
 
 
-async def test_online_submission_falls_back_to_fresh_http_form() -> None:
+async def test_online_submission_preview_requires_rest_without_html_inspection() -> None:
     gateway = FakeSessionGateway()
     service = _service_with(gateway)
-    preview = await service.preview_save_online_submission(None, "Texto", 17)
 
-    result = await service.save_online_submission(
-        None,
-        "Texto",
-        preview["confirmation_token"],
-        17,
-    )
+    with pytest.raises(CampusCapabilityUnavailable, match="token REST"):
+        await service.preview_save_online_submission(None, "Texto", 17)
 
-    assert result["request_sent"] is True
-    assert gateway.forms.calls[-1] == (
-        "save_assignment",
-        (17, {"onlinetext_editor[text]": "Texto"}, True),
-    )
-
-
-async def test_html_assignment_uses_cmid_without_inventing_assignment_id() -> None:
-    gateway = FakeSessionGateway()
-    service = _service_with(gateway)
-    preview = await service.preview_save_online_submission(None, "Texto", 17)
-
-    result = await service.save_online_submission(
-        None,
-        "Texto",
-        preview["confirmation_token"],
-        17,
-    )
-
-    assert result["request_sent"] is True
+    assert gateway.forms.calls == []
     assert gateway.invoke_calls == []
 
 
-async def test_session_assignment_rejects_internal_id_cmid_pair_before_inspection() -> None:
+async def test_online_submission_effect_requires_rest_without_html_write() -> None:
     gateway = FakeSessionGateway()
     service = _service_with(gateway)
 
-    with pytest.raises(ValueError, match="assignment_id=null"):
+    with pytest.raises(CampusCapabilityUnavailable, match="token REST"):
+        await service.save_online_submission(None, "Texto", "unused-token", 17)
+
+    assert gateway.forms.calls == []
+    assert gateway.invoke_calls == []
+
+
+async def test_session_assignment_rejects_transport_before_inspection() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    with pytest.raises(CampusCapabilityUnavailable, match="token REST"):
         await service.preview_save_online_submission(8, "Texto", 17)
 
     assert gateway.forms.calls == []
@@ -145,6 +132,8 @@ async def test_quiz_start_falls_back_to_http_form_with_exact_confirmation() -> N
     service = _service_with(gateway)
     preview = await service.preview_start_quiz(None, {"quizpassword": "clave"}, False, 23)
 
+    assert gateway.forms.calls == []
+
     result = await service.start_quiz(
         None,
         {"quizpassword": "clave"},
@@ -160,22 +149,16 @@ async def test_quiz_start_falls_back_to_http_form_with_exact_confirmation() -> N
     )
 
 
-async def test_ambiguous_write_result_never_falls_back_to_a_second_write() -> None:
+async def test_session_assignment_does_not_attempt_ambiguous_write_or_fallback() -> None:
     gateway = FakeSessionGateway()
     service = _service_with(gateway)
-    preview = await service.preview_save_online_submission(None, "Texto", 17)
     gateway.ambiguous = True
-    gateway.forms_enabled = False
 
-    with pytest.raises(CampusProtocolError):
-        await service.save_online_submission(
-            None,
-            "Texto",
-            preview["confirmation_token"],
-            17,
-        )
+    with pytest.raises(CampusCapabilityUnavailable, match="token REST"):
+        await service.save_online_submission(None, "Texto", "unused-token", 17)
 
-    assert all(call[0] != "save_assignment" for call in gateway.forms.calls)
+    assert gateway.forms.calls == []
+    assert gateway.invoke_calls == []
 
 
 async def test_session_quiz_rejects_internal_id_cmid_pair_before_inspection() -> None:

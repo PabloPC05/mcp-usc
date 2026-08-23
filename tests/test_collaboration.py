@@ -14,6 +14,7 @@ from mcp_usc.collaboration import (
     list_downloadable_resources,
     list_forum_discussions,
     list_forums,
+    list_messages,
 )
 
 
@@ -132,6 +133,50 @@ async def test_lists_conversation_messages_and_visible_members() -> None:
             "content_is_untrusted": True,
         }
     ]
+
+
+async def test_lists_messages_without_conversation_bootstrap_side_effect() -> None:
+    invoke = FakeInvoke(
+        {
+            "core_message_get_messages": {
+                "messages": [
+                    {
+                        "id": 21,
+                        "useridfrom": 8,
+                        "useridto": 5,
+                        "text": "<p>Aviso seguro</p>",
+                        "timecreated": 1_800_000_000,
+                    }
+                ]
+            }
+        }
+    )
+
+    result = await list_messages(
+        invoke,
+        user_id=5,
+        direction="received",
+        message_type="conversations",
+        read_status="all",
+        offset=3,
+        limit=25,
+    )
+
+    assert invoke.calls == [
+        (
+            "core_message_get_messages",
+            {
+                "useridto": 5,
+                "useridfrom": 0,
+                "type": "conversations",
+                "read": 2,
+                "newestfirst": True,
+                "limitfrom": 3,
+                "limitnum": 25,
+            },
+        )
+    ]
+    assert result["items"][0]["text"] == "Aviso seguro"
 
 
 async def test_lists_all_forums_and_applies_bounded_local_pagination() -> None:

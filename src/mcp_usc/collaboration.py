@@ -225,6 +225,50 @@ async def list_conversations(
     )
 
 
+async def list_messages(
+    invoke: Invoke,
+    *,
+    user_id: int,
+    direction: str = "received",
+    message_type: str = "conversations",
+    read_status: str = "all",
+    offset: int = 0,
+    limit: int = 50,
+    newest: bool = True,
+) -> dict[str, Any]:
+    """Read a message stream without Moodle's self-conversation bootstrap side effect."""
+
+    user_id = _positive_id(user_id, "user_id")
+    offset, limit = _pagination(offset, limit)
+    if direction not in {"received", "sent"}:
+        raise ValueError("direction debe ser received o sent")
+    if message_type not in {"conversations", "notifications", "both"}:
+        raise ValueError("message_type debe ser conversations, notifications o both")
+    read_values = {"unread": 0, "read": 1, "all": 2}
+    if read_status not in read_values:
+        raise ValueError("read_status debe ser unread, read o all")
+    payload = await invoke(
+        "core_message_get_messages",
+        {
+            "useridto": user_id if direction == "received" else 0,
+            "useridfrom": user_id if direction == "sent" else 0,
+            "type": message_type,
+            "read": read_values[read_status],
+            "newestfirst": bool(newest),
+            "limitfrom": offset,
+            "limitnum": limit,
+        },
+    )
+    messages = _mapping_items(payload, "messages")
+    return _page_result(
+        [_normalise_message(item) for item in messages[:limit]],
+        offset=offset,
+        limit=limit,
+        warnings=_warnings(payload),
+        server_side_pagination=True,
+    )
+
+
 async def list_conversation_messages(
     invoke: Invoke,
     *,

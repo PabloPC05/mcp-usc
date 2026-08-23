@@ -10,6 +10,8 @@ import respx
 from mcp_usc.campus import (
     SESSION_CREDENTIAL_NAME,
     AuthenticationRequired,
+    CampusCapabilityUnavailable,
+    CampusProtocolError,
     HttpSessionMoodleGateway,
     _activities_from_sections,
 )
@@ -63,7 +65,7 @@ def _settings() -> Settings:
     )
 
 
-def _dashboard_html() -> str:
+def _session_context_html() -> str:
     return """
     <html><head><title>Campus USC</title></head><body>
       <div class="usermenu"><span class="usertext">Ada</span></div>
@@ -72,11 +74,29 @@ def _dashboard_html() -> str:
     """
 
 
+async def test_session_rejects_rest_only_contextual_actions_before_any_http() -> None:
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusCapabilityUnavailable, match="token REST"):
+        await gateway.require_functions(
+            {
+                "core_calendar_get_calendar_access_information",
+                "core_calendar_create_calendar_events",
+                "core_question_update_flag",
+            }
+        )
+
+
 @respx.mock
-async def test_session_status_uses_keyring_cookie_over_http_without_exposing_it() -> None:
+async def test_session_status_uses_non_stateful_preferences_context() -> None:
     store = MemoryCredentialStore("session-secret")
-    route = respx.get("https://cv.usc.es/my/").mock(
-        return_value=httpx.Response(200, text=_dashboard_html())
+    route = respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
+    )
+    dashboard = respx.get("https://cv.usc.es/my/").mock(
+        return_value=httpx.Response(200, text="must not be requested")
     )
 
     result = await HttpSessionMoodleGateway(_settings(), store).status()  # type: ignore[arg-type]
@@ -90,15 +110,16 @@ async def test_session_status_uses_keyring_cookie_over_http_without_exposing_it(
     }
     assert store.get_calls == [SESSION_CREDENTIAL_NAME]
     assert route.calls[0].request.headers["cookie"] == "MoodleSession=session-secret"
+    assert dashboard.call_count == 0
     assert "session-secret" not in str(result)
     assert "abc123" not in str(result)
 
 
 @respx.mock
-async def test_session_ajax_fetches_sesskey_from_dashboard_then_posts_json() -> None:
+async def test_session_ajax_fetches_sesskey_from_preferences_then_posts_json() -> None:
     store = MemoryCredentialStore("session-secret")
-    dashboard = respx.get("https://cv.usc.es/my/").mock(
-        return_value=httpx.Response(200, text=_dashboard_html())
+    preferences = respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
     )
     ajax = respx.post(
         "https://cv.usc.es/lib/ajax/service.php",
@@ -118,7 +139,7 @@ async def test_session_ajax_fetches_sesskey_from_dashboard_then_posts_json() -> 
     ).list_courses()
 
     assert courses == [{"id": 7, "fullname": "Álxebra"}]
-    assert dashboard.call_count == 1
+    assert preferences.call_count == 1
     assert ajax.call_count == 1
     request = ajax.calls[0].request
     assert request.headers["cookie"] == "MoodleSession=session-secret"
@@ -136,9 +157,23 @@ async def test_session_ajax_fetches_sesskey_from_dashboard_then_posts_json() -> 
 
 
 @respx.mock
+async def test_session_ajax_rejects_oversized_json_before_parsing() -> None:
+    store = MemoryCredentialStore("session-secret")
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
+    )
+    respx.post("https://cv.usc.es/lib/ajax/service.php").mock(
+        return_value=httpx.Response(200, content=b"x" * (5 * 1024 * 1024 + 1))
+    )
+
+    with pytest.raises(CampusProtocolError, match="límite de bytes"):
+        await HttpSessionMoodleGateway(_settings(), store).list_courses()  # type: ignore[arg-type]
+
+
+@respx.mock
 async def test_session_redirect_to_login_becomes_authentication_error() -> None:
     store = MemoryCredentialStore("expired-secret")
-    respx.get("https://cv.usc.es/my/").mock(
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
         return_value=httpx.Response(302, headers={"location": "/login/index.php"})
     )
 
@@ -149,10 +184,10 @@ async def test_session_redirect_to_login_becomes_authentication_error() -> None:
 @respx.mock
 async def test_rotated_moodle_cookie_is_saved_back_to_keyring() -> None:
     store = MemoryCredentialStore("old-session")
-    respx.get("https://cv.usc.es/my/").mock(
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
         return_value=httpx.Response(
             200,
-            text=_dashboard_html(),
+            text=_session_context_html(),
             headers={"set-cookie": "MoodleSession=new-session; Secure; HttpOnly; Path=/"},
         )
     )
@@ -165,8 +200,8 @@ async def test_rotated_moodle_cookie_is_saved_back_to_keyring() -> None:
 @respx.mock
 async def test_message_contract_uses_plain_text_and_only_mocked_http() -> None:
     store = MemoryCredentialStore("session-secret")
-    respx.get("https://cv.usc.es/my/").mock(
-        return_value=httpx.Response(200, text=_dashboard_html())
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
     )
     ajax = respx.post(
         "https://cv.usc.es/lib/ajax/service.php",
@@ -250,10 +285,10 @@ async def test_session_form_adapter_posts_fresh_assignment_form_and_follows_safe
 
 
 @respx.mock
-async def test_session_course_contents_falls_back_to_http_html_when_ajax_is_unavailable() -> None:
+async def test_session_course_contents_fails_closed_without_html_get() -> None:
     store = MemoryCredentialStore("session-secret")
-    respx.get("https://cv.usc.es/my/").mock(
-        return_value=httpx.Response(200, text=_dashboard_html())
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
     )
     respx.post(
         "https://cv.usc.es/lib/ajax/service.php",
@@ -272,39 +307,29 @@ async def test_session_course_contents_falls_back_to_http_html_when_ajax_is_unav
             ],
         )
     )
-    course_html = """
-    <li class="section course-section" data-id="70" data-section="1">
-      <h3 class="sectionname">Tema 1</h3>
-      <li class="activity" data-moduleid="11">
-        <a href="/mod/resource/view.php?id=11"><span class="instancename">Guía</span></a>
-        <div class="activity-description">Material docente</div>
-        <a href="/pluginfile.php/70/mod_resource/content/1/guia.pdf">guia.pdf</a>
-      </li>
-    </li>
-    """
-    respx.get("https://cv.usc.es/course/view.php", params={"id": 7}).mock(
-        return_value=httpx.Response(200, text=course_html)
+    course_page = respx.get("https://cv.usc.es/course/view.php", params={"id": 7}).mock(
+        return_value=httpx.Response(200, text="must not be requested")
     )
     gateway = HttpSessionMoodleGateway(_settings(), store)  # type: ignore[arg-type]
 
-    result = await gateway.invoke("core_course_get_contents", {"courseid": 7, "options": []})
+    with pytest.raises(CampusCapabilityUnavailable):
+        await gateway.invoke("core_course_get_contents", {"courseid": 7, "options": []})
 
-    assert result[0]["name"] == "Tema 1"
-    assert result[0]["modules"][0]["id"] == 11
-    assert result[0]["modules"][0]["contents"][0]["filename"] == "guia.pdf"
-    assert result[0]["modules"][0]["id_is_course_module"] is True
+    assert course_page.call_count == 0
 
 
 @respx.mock
-async def test_session_resource_page_follows_only_safe_redirect_to_pluginfile() -> None:
+async def test_session_resource_view_page_fails_closed_without_http_get() -> None:
     store = MemoryCredentialStore("session-secret")
-    respx.get("https://cv.usc.es/mod/resource/view.php", params={"id": 11}).mock(
+    resource_page = respx.get("https://cv.usc.es/mod/resource/view.php", params={"id": 11}).mock(
         return_value=httpx.Response(
             303,
             headers={"location": "/pluginfile.php/70/mod_resource/content/1/guia.pdf"},
         )
     )
-    respx.get("https://cv.usc.es/pluginfile.php/70/mod_resource/content/1/guia.pdf").mock(
+    plugin_file = respx.get(
+        "https://cv.usc.es/pluginfile.php/70/mod_resource/content/1/guia.pdf"
+    ).mock(
         return_value=httpx.Response(
             200,
             content=b"pdf-content",
@@ -312,10 +337,10 @@ async def test_session_resource_page_follows_only_safe_redirect_to_pluginfile() 
         )
     )
 
-    content, media_type, source_url = await HttpSessionMoodleGateway(  # type: ignore[arg-type]
-        _settings(), store
-    ).fetch_file("https://cv.usc.es/mod/resource/view.php?id=11", 1024)
+    with pytest.raises(CampusCapabilityUnavailable):
+        await HttpSessionMoodleGateway(  # type: ignore[arg-type]
+            _settings(), store
+        ).fetch_file("https://cv.usc.es/mod/resource/view.php?id=11", 1024)
 
-    assert content == b"pdf-content"
-    assert media_type == "application/pdf"
-    assert source_url.endswith("/guia.pdf")
+    assert resource_page.call_count == 0
+    assert plugin_file.call_count == 0

@@ -4,24 +4,28 @@ Servidor MCP local y HTTP-first para el Campus Virtual Moodle de la Universidade
 Compostela. Permite consultar cursos, calendario, mensajes, foros, materiales, tareas y
 cuestionarios, además de buscar fechas de examen en páginas y PDF oficiales de la USC.
 
-La versión 0.2.0 también incorpora escrituras deliberadas —mensajes, entregas e intentos de
-cuestionarios— separadas de sus lecturas y protegidas mediante previsualización, token de un solo
-uso y aprobación del cliente MCP. No es un conector «solo lectura»; las herramientas `list`, `get`,
-`search`, `read`, `check` y todas las `preview_*` sí lo son.
+La versión 0.3.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
+permitidas y 109 acciones identificadas. Solo doce cambios privados de alcance inequívoco se
+pueden ejecutar por la interfaz genérica; publicaciones, actividades evaluables, entregas,
+cuestionarios y eliminaciones usan herramientas contextuales. Toda operación con efecto exige
+previsualización, token de un solo uso y aprobación del cliente MCP.
 
 ## Principios de diseño
 
 - El servidor MCP usa STDIO; «HTTP-first» describe la conexión entre este proceso y Moodle/USC.
 - Las consultas y escrituras normales no automatizan un navegador.
 - Se prefiere la API REST oficial de Moodle cuando hay un token legítimo.
-- Con una cookie `MoodleSession`, se usan AJAX *same-origin* y páginas/formularios HTML como
-  alternativa HTTP.
+- Con una cookie `MoodleSession`, las lecturas usan AJAX *same-origin* y descargas directas
+  `/pluginfile.php`. Los formularios HTML se reservan a operaciones de cuestionario ya confirmadas.
 - Playwright solo abre un navegador visible para completar Microsoft Entra/MFA y obtener la cookie
   inicial. Se cierra al terminar el login.
 - Todo texto remoto —nombres, mensajes, preguntas, avisos y documentos— se marca como contenido no
   confiable y nunca se interpreta como instrucciones.
 - El conector actúa únicamente con los permisos de la cuenta autenticada: no eleva privilegios ni
   suplanta a profesorado o administración.
+- Debe configurarse con una cuenta de alumno y un token de mínimo privilegio. Las APIs compartidas
+  de Moodle siempre respetan los permisos efectivos y una cuenta con roles adicionales podría ver
+  más datos que un alumno normal.
 
 No consulta correo ni Teams. Un mensaje interno de Moodle puede generar notificaciones externas
 según la configuración del destinatario; la vista previa lo advierte antes del envío.
@@ -95,10 +99,13 @@ no pasa por el MCP.
 
 Después del login, todas las operaciones usan `httpx`:
 
-- `/my/` aporta la identidad y el `sesskey` efímero;
+- `/user/preferences.php` aporta la identidad y el `sesskey` efímero sin abrir el dashboard;
 - `/lib/ajax/service.php` ejecuta funciones marcadas como AJAX;
-- las páginas y formularios HTML cubren operaciones que Moodle no publica por AJAX;
-- las descargas autenticadas conservan la cookie y aplican límites locales.
+- las lecturas fallan de forma cerrada si Moodle no las publica por AJAX;
+- las descargas autenticadas conservan la cookie, aceptan solo `/pluginfile.php` directo y aplican
+  límites locales;
+- únicamente ciertas operaciones de cuestionario, después de confirmación explícita, pueden usar
+  formularios HTML.
 
 El `sesskey` no se persiste ni se devuelve. Por exigencia del protocolo AJAX puede aparecer en la
 URL que ve la infraestructura de Moodle. La cookie equivale a una credencial mientras esté vigente:
@@ -108,13 +115,17 @@ no la copies, registres, publiques ni sincronices. Cuando caduque, repite `mcp-u
 
 | Capacidad | Token REST | Sesión HTTP |
 | --- | --- | --- |
-| Cursos, Timeline y calendario | API REST | AJAX o HTML |
+| Cursos, Timeline y calendario | API REST | AJAX; sin fallback a páginas que registren vistas |
 | Conversaciones y mensajes | REST | AJAX |
-| Foros, discusiones y posts | REST | AJAX cuando existe; HTML como alternativa |
-| Materiales y recursos | REST | HTML y descarga autenticada |
-| Texto online y envío de tareas | REST | Formularios HTML cuando Moodle los expone |
+| Foros y discusiones | REST | AJAX cuando existe; sin fallback HTML |
+| Posts de una discusión | REST con confirmación | AJAX con confirmación, si la función existe |
+| Publicar discusión/respuesta de foro | REST | No disponible de forma segura por AJAX |
+| Crear/borrar eventos personales | REST | No disponible de forma segura por AJAX |
+| Enviar/retirar respuesta Choice | REST | No disponible de forma segura por AJAX |
+| Materiales y recursos | REST | AJAX y descarga `/pluginfile.php` directa; nunca `view.php` |
+| Lectura y modificación de tareas | REST | No disponible de forma segura |
 | Archivos de entregas | REST + `/webservice/upload.php` multipart | No se manipula el `filemanager` JavaScript |
-| Cuestionarios | REST | AJAX o formularios HTML, según la función |
+| Cuestionarios | REST | AJAX para lecturas puras; formulario solo tras confirmar acciones |
 
 El gestor `filemanager` de Moodle crea borradores mediante JavaScript y no equivale a un campo
 multipart estándar. Si una entrega solo ofrece ese gestor, reemplazar o borrar sus archivos requiere
@@ -197,21 +208,51 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.2.0 expone 42 herramientas: 24 lecturas, 9 previsualizaciones y 9 escrituras.
+La versión 0.3.0 expone 75 herramientas: 39 lecturas, 18 previsualizaciones y 18 operaciones con
+efecto. El [estudio completo de capacidades](docs/student-capability-study.md) explica el inventario,
+las fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
 
 | Grupo | Lectura | Previsualización | Escritura |
 | --- | --- | --- | --- |
-| Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements` | — | — |
-| Mensajes y foros | `list_conversations`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `list_discussion_posts`, `search_message_contacts` | `preview_message` | `send_message` |
+| Catálogo del alumno | `list_student_capabilities`, `call_student_read`, perfil, preferencias, participantes, grupos, notas, progreso, notificaciones, insignias y archivos privados | `preview_student_action` | `execute_student_action` |
+| Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements`, `list_calendar_events` | crear o borrar un evento personal | crear o borrar un evento personal |
+| Mensajes y foros | `list_messages`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `search_message_contacts`; `list_discussion_posts` se conserva pero falla cerrado | mensaje, inspección de posts, nueva discusión o respuesta | enviar mensaje, inspeccionar posts, crear discusión o responder |
+| Choice | funciones de lectura del catálogo | enviar o retirar respuesta | enviar o retirar respuesta propia |
 | Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates` | — | — |
 | Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
-| Cuestionarios | `list_quizzes`, `list_quiz_attempts`, `get_quiz_attempt_page`, `get_quiz_attempt_summary` | `preview_start_quiz`, `preview_save_quiz_answers`, `preview_finish_quiz` | `start_quiz`, `save_quiz_answers`, `finish_quiz` |
+| Cuestionarios | `list_quizzes`, `list_quiz_attempts`, revisión final y mejor nota | inspeccionar intento activo, iniciar, guardar o finalizar | inspeccionar intento activo, iniciar, guardar o finalizar |
+
+`call_student_read` solo acepta las 192 funciones incluidas expresamente en la lista blanca; no es
+un proxy Moodle arbitrario. Con token REST, `list_student_capabilities(available_only=true)` permite
+ver cuáles anuncia el servicio configurado. Con sesión AJAX la disponibilidad completa no siempre
+es descubrible y cada llamada falla cerrada si Moodle no expone la función.
+
+Las doce acciones genéricas se limitan a preferencias propias, favoritos privados, silenciar o
+marcar conversaciones/notificaciones, conservar un borrador no enviado y marcar una pregunta. Las
+acciones contextuales nuevas resuelven por HTTP propietario, curso, foro, grupo, audiencia, fase y
+opciones antes de emitir confirmación:
+
+- crear o borrar eventos personales del calendario;
+- iniciar una discusión o responder públicamente en un foro, sin adjuntos ni respuesta privada;
+- enviar o retirar las respuestas propias de una actividad Choice.
+
+Estas seis acciones contextuales requieren que un token REST legítimo las anuncie. Moodle 4.5–5.2
+no marca normalmente sus funciones como AJAX; el modo cookie se detiene antes de previsualizar y no
+intenta emularlas con navegador.
+
+El catálogo también identifica acciones estudiantiles que todavía no tienen ejecutor seguro. Se
+publican como `generic_execution_supported=false`: aparecer en el inventario no permite
+ejecutarlas ni implica que la USC tenga activo el módulo o plugin correspondiente.
 
 ### Mensajes, foros y materiales
 
-- Las conversaciones se leen sin marcarlas como leídas.
-- Los foros incluyen todos los visibles, no solo novedades; se pueden recorrer discusiones, posts y
-  metadatos de adjuntos con paginación y límites locales.
+- `list_messages` lee mensajes recibidos o enviados sin marcarlos. `list_conversations` se conserva
+  solo para compatibilidad y falla de forma cerrada: ciertas versiones de Moodle pueden crear y
+  marcar como favorita una conversación consigo mismo al ejecutar esa supuesta lectura.
+- Los foros incluyen todos los visibles, no solo novedades. Moodle puede marcar posts como leídos
+  al ejecutar `mod_forum_get_discussion_posts`; por eso `list_discussion_posts` falla cerrado y el
+  par `preview_inspect_discussion_posts` / `inspect_discussion_posts` exige confirmación antes de
+  recorrer posts y metadatos de adjuntos.
 - `search_message_contacts` crea una referencia temporal al destinatario. `preview_message` exige
   una búsqueda reciente, muestra nombre, ID y texto, y nunca envía.
 - `list_course_contents` lista secciones, actividades, páginas, enlaces y archivos.
@@ -220,12 +261,16 @@ La versión 0.2.0 expone 42 herramientas: 24 lecturas, 9 previsualizaciones y 9 
 - `read_course_resource` admite PDF, texto/HTML y OOXML (`.docx`, `.pptx`, `.xlsx`). De forma
   predeterminada limita la descarga a 25 MiB, el texto a 100 000 caracteres y los PDF a 100 páginas;
   los máximos aceptados por llamada son 50 MiB, 500 000 caracteres y 300 páginas.
+- En modo sesión, contenidos y anuncios exigen una función AJAX pura y los recursos deben apuntar
+  directamente a `/pluginfile.php`; abrir `course/view.php`, `mod/*/view.php` o páginas de foro se
+  rechaza porque puede registrar visitas, marcar lecturas o cambiar la finalización.
 
 ### Tareas y entregas
 
-- Se pueden listar tareas y consultar borrador, archivos, texto online, feedback y permisos.
-- Si la lista procede del HTML, `assignment_id` es `null` y `course_module_id` contiene el CMID real;
-  las herramientas de formulario aceptan esa pareja sin presentar el CMID como ID interno.
+- Con un token REST que anuncie las funciones necesarias se pueden listar tareas y consultar
+  borrador, archivos, texto online, feedback y permisos.
+- Las páginas HTML de tareas registran vistas y pueden cambiar la finalización; por ello todas las
+  lecturas, previsualizaciones y escrituras de tareas fallan antes de abrirlas en modo sesión.
 - Guardar texto, reemplazar/borrar archivos, enviar para calificación o eliminar la entrega completa
   son escrituras distintas, cada una con su propia vista previa.
 - `submit_assignment` puede cerrar la edición del borrador y debe respetar la declaración de entrega
@@ -238,9 +283,14 @@ La versión 0.2.0 expone 42 herramientas: 24 lecturas, 9 previsualizaciones y 9 
 
 ### Cuestionarios
 
-- Se pueden listar cuestionarios e intentos propios y leer páginas/resúmenes sin guardar respuestas.
-- En el fallback HTML, `quiz_id` es `null` y se usa únicamente el `course_module_id` mostrado; una
-  pareja ambigua se rechaza antes de inspeccionar o enviar un formulario.
+- Se pueden listar cuestionarios e intentos propios y leer la revisión permitida de un intento ya
+  finalizado.
+- Abrir los datos o el resumen de un intento activo puede hacer que Moodle procese un vencimiento y
+  cambie su estado. Por ello `get_quiz_attempt_page` y `get_quiz_attempt_summary` fallan cerrados;
+  `preview_inspect_quiz_attempt` muestra el riesgo y `inspect_quiz_attempt` exige confirmación.
+- En modo sesión, las listas puras requieren AJAX. Los formularios solo se abren en la segunda
+  llamada confirmada para inspeccionar un intento potencialmente stateful, iniciarlo, guardar o
+  finalizar; la previsualización no abre `mod/quiz/view.php`.
 - `start_quiz` puede activar inmediatamente un temporizador.
 - `save_quiz_answers` modifica un intento abierto pero no lo finaliza.
 - `finish_quiz` normalmente es irreversible.
@@ -327,10 +377,10 @@ se copió código.
 - La disponibilidad de cada Web Service depende de la versión, configuración y permisos que la USC
   asigne al token o sesión.
 - La sesión OIDC y `MoodleSession` caducan; hay que ejecutar de nuevo `mcp-usc login`.
-- AJAX, formularios HTML y selectores del Campus pueden cambiar entre versiones. El conector falla
-  de forma cerrada si no reconoce con seguridad una escritura.
-- El `filemanager` JavaScript de una entrega no puede manipularse con seguridad en modo sesión sin
-  un campo multipart nativo; usa REST para archivos en ese caso.
+- AJAX y los formularios de cuestionario pueden cambiar entre versiones. El conector falla de forma
+  cerrada si no reconoce con seguridad una operación.
+- Las tareas exigen REST: sus páginas registran vistas y el `filemanager` JavaScript no equivale a
+  un campo multipart nativo.
 - Eliminar una entrega completa exige Moodle 4.5+ y permisos vigentes. Reabrir una entrega cerrada
   corresponde al profesorado.
 - No todo el profesorado usa el Campus Virtual; correo o Teams pueden contener información que este

@@ -17,12 +17,15 @@ from .assignments import replace_submission_files as moodle_replace_submission_f
 from .assignments import save_submission as moodle_save_submission
 from .assignments import submission_plugin_safety
 from .assignments import submit_for_grading as moodle_submit_for_grading
-from .campus import CampusCapabilityUnavailable, CampusProtocolError, create_campus_gateway
-from .collaboration import (
-    list_conversation_messages as moodle_list_conversation_messages,
+from .campus import (
+    AuthenticationRequired,
+    CampusCapabilityUnavailable,
+    CampusError,
+    CampusProtocolError,
+    create_campus_gateway,
 )
 from .collaboration import (
-    list_conversations as moodle_list_conversations,
+    list_conversation_messages as moodle_list_conversation_messages,
 )
 from .collaboration import (
     list_course_contents as moodle_list_course_contents,
@@ -37,7 +40,43 @@ from .collaboration import (
     list_forum_discussions as moodle_list_forum_discussions,
 )
 from .collaboration import list_forums as moodle_list_forums
+from .collaboration import list_messages as moodle_list_messages
 from .confirmations import ACTION_CONFIRMATIONS
+from .contextual_actions import (
+    ContextualActionError,
+)
+from .contextual_actions import (
+    cancel_choice_response as moodle_cancel_choice_response,
+)
+from .contextual_actions import (
+    create_forum_discussion as moodle_create_forum_discussion,
+)
+from .contextual_actions import (
+    create_personal_calendar_event as moodle_create_personal_calendar_event,
+)
+from .contextual_actions import (
+    delete_personal_calendar_event as moodle_delete_personal_calendar_event,
+)
+from .contextual_actions import (
+    preview_cancel_choice_response as moodle_preview_cancel_choice_response,
+)
+from .contextual_actions import (
+    preview_create_forum_discussion as moodle_preview_create_forum_discussion,
+)
+from .contextual_actions import (
+    preview_create_personal_calendar_event as moodle_preview_create_personal_calendar_event,
+)
+from .contextual_actions import (
+    preview_delete_personal_calendar_event as moodle_preview_delete_personal_calendar_event,
+)
+from .contextual_actions import (
+    preview_reply_forum_post as moodle_preview_reply_forum_post,
+)
+from .contextual_actions import (
+    preview_submit_choice_response as moodle_preview_submit_choice_response,
+)
+from .contextual_actions import reply_forum_post as moodle_reply_forum_post
+from .contextual_actions import submit_choice_response as moodle_submit_choice_response
 from .domain import MADRID, normalise_announcement, normalise_course, normalise_event
 from .local_files import inspect_upload_files
 from .public_web import search_exam_sources
@@ -46,6 +85,14 @@ from .quizzes import MoodleQuizClient
 from .resource_text import extract_resource_text
 from .security import html_to_text
 from .settings import Settings
+from .student_capabilities import (
+    GENERIC_ACTIONS,
+    bind_account,
+    capability_catalog,
+    get_capability,
+    sanitise_result,
+    validate_arguments,
+)
 
 _MESSAGE_CONFIRMATION_TTL = 300
 _MESSAGE_CONFIRMATIONS: dict[str, tuple[float, int, int, str]] = {}
@@ -126,6 +173,15 @@ async def _require_functions(gateway: Any, *functions: str) -> None:
         await checker(set(functions))
 
 
+def _require_rest_for_assignment(gateway: Any) -> None:
+    form_factory = getattr(gateway, "session_forms", None)
+    if form_factory is not None and form_factory() is not None:
+        raise CampusCapabilityUnavailable(
+            "Las páginas HTML de tareas registran vistas y pueden cambiar la finalización. "
+            "Esta operación exige un token REST de mínimo privilegio."
+        )
+
+
 def _identity_bound_payload(payload: dict[str, Any], user_id: int) -> dict[str, Any]:
     return {"authenticated_user_id": user_id, "parameters": payload}
 
@@ -157,6 +213,53 @@ async def _consume_action_confirmation(
     return user_id
 
 
+async def _contextual_confirmation(
+    gateway: Any,
+    action: str,
+    request: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    if context.get("allowed") is not True:
+        context["requires_confirmation"] = False
+        return context
+    confirmation = await _issue_action_confirmation(
+        gateway,
+        action,
+        {"request": request, "context": context},
+    )
+    return {**context, **confirmation}
+
+
+async def _consume_contextual_confirmation(
+    gateway: Any,
+    token: str,
+    action: str,
+    request: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    if context.get("allowed") is not True:
+        raise PermissionError(str(context.get("reason") or "Moodle ya no permite esta acción"))
+    await _consume_action_confirmation(
+        gateway,
+        token,
+        action,
+        {"request": request, "context": context},
+    )
+
+
+def _unknown_contextual_result(action: str) -> dict[str, Any]:
+    return {
+        "request_may_have_been_sent": True,
+        "outcome": "unknown",
+        "do_not_retry": True,
+        "action": action,
+        "warning": (
+            "No se pudo verificar el resultado. Moodle puede haber aplicado la acción; "
+            "comprueba su estado mediante una lectura antes de tomar otra decisión."
+        ),
+    }
+
+
 class UscService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings.from_env()
@@ -166,6 +269,636 @@ class UscService:
 
     async def auth_status(self) -> dict[str, Any]:
         return await self._campus().status()
+
+    async def list_student_capabilities(
+        self,
+        category: str | None = None,
+        access: str | None = None,
+        available_only: bool = False,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await gateway.status()
+        available = await gateway.available_functions()
+        items = capability_catalog(
+            category=category,
+            access=access,
+            available_functions=available,
+        )
+        if available_only and available is not None:
+            items = [item for item in items if item["available_for_configured_token"]]
+        return {
+            "items": items,
+            "count": len(items),
+            "availability_known": available is not None,
+            "available_only_applied": available_only and available is not None,
+            "note": (
+                "La disponibilidad real depende de los permisos, plugins y contexto Moodle. "
+                "Las acciones siempre exigen preview y confirmación."
+            ),
+        }
+
+    async def call_student_read(
+        self, function: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        capability = get_capability(function, "read")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        clean_arguments = bind_account(validate_arguments(arguments), user_id, function=function)
+        await _require_functions(gateway, function)
+        result = sanitise_result(await gateway.invoke(function, clean_arguments))
+        return {
+            "function": function,
+            "category": capability.category,
+            "result": result,
+            "content_is_untrusted": True,
+        }
+
+    async def student_action(
+        self,
+        function: str,
+        arguments: dict[str, Any] | None,
+        confirmation_token: str | None,
+    ) -> dict[str, Any]:
+        capability = get_capability(function, "action")
+        if function not in GENERIC_ACTIONS:
+            raise ValueError(
+                "Esta acción no puede ejecutarse por la interfaz genérica: necesita una "
+                "previsualización específica que resuelva el objeto, propietario, curso, "
+                "audiencia y alcance exactos."
+            )
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        clean_arguments = bind_account(validate_arguments(arguments), user_id, function=function)
+        payload = {
+            "function": function,
+            "arguments": clean_arguments,
+        }
+        if confirmation_token is None:
+            await _require_functions(gateway, function)
+            confirmation = await _issue_action_confirmation(
+                gateway,
+                "student_api_action",
+                payload,
+            )
+            return {
+                "preview": True,
+                "function": function,
+                "category": capability.category,
+                "description": capability.description,
+                "consequence": capability.consequence,
+                "destructive": capability.destructive,
+                "arguments": clean_arguments,
+                **confirmation,
+            }
+        await _consume_action_confirmation(
+            gateway,
+            confirmation_token,
+            "student_api_action",
+            payload,
+        )
+        try:
+            result = sanitise_result(await gateway.invoke(function, clean_arguments))
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ValueError):
+            return {
+                "request_may_have_been_sent": True,
+                "outcome": "unknown",
+                "do_not_retry": True,
+                "function": function,
+                "warning": (
+                    "No se pudo verificar el resultado. Moodle puede haber aplicado la acción; "
+                    "comprueba el estado mediante una lectura antes de tomar otra decisión."
+                ),
+            }
+        return {
+            "request_sent": True,
+            "outcome": "reported_by_moodle",
+            "function": function,
+            "result": result,
+            "content_is_untrusted": True,
+        }
+
+    async def get_my_profile(self) -> dict[str, Any]:
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        return await self.call_student_read(
+            "core_user_get_users_by_field",
+            {"field": "id", "values": [str(user_id)]},
+        )
+
+    async def get_my_preferences(self, name: str | None = None) -> dict[str, Any]:
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        arguments: dict[str, Any] = {"userid": user_id}
+        if name:
+            if len(name) > 100:
+                raise ValueError("name es demasiado largo")
+            arguments["name"] = name
+        return await self.call_student_read("core_user_get_user_preferences", arguments)
+
+    async def list_course_participants(
+        self, course_id: int, offset: int, limit: int
+    ) -> dict[str, Any]:
+        if course_id <= 0:
+            raise ValueError("course_id debe ser positivo")
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("offset/limit no son válidos")
+        return await self.call_student_read(
+            "core_enrol_get_enrolled_users",
+            {
+                "courseid": course_id,
+                "options": [
+                    {"name": "limitfrom", "value": offset},
+                    {"name": "limitnumber", "value": limit},
+                    {"name": "sortby", "value": "fullname"},
+                    {"name": "sortdirection", "value": "ASC"},
+                ],
+            },
+        )
+
+    async def list_my_groups(self, course_id: int) -> dict[str, Any]:
+        if course_id <= 0:
+            raise ValueError("course_id debe ser positivo")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        return await self.call_student_read(
+            "core_group_get_course_user_groups",
+            {"courseid": course_id, "userid": user_id, "groupingid": 0},
+        )
+
+    async def get_my_grades(self, course_id: int | None = None) -> dict[str, Any]:
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        if course_id is None:
+            return await self.call_student_read(
+                "gradereport_overview_get_course_grades",
+                {"userid": user_id},
+            )
+        if course_id <= 0:
+            raise ValueError("course_id debe ser positivo")
+        return await self.call_student_read(
+            "gradereport_user_get_grade_items",
+            {"courseid": course_id, "userid": user_id, "groupid": 0},
+        )
+
+    async def get_my_completion(self, course_id: int) -> dict[str, Any]:
+        if course_id <= 0:
+            raise ValueError("course_id debe ser positivo")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        functions = {
+            "core_completion_get_activities_completion_status",
+            "core_completion_get_course_completion_status",
+        }
+        await _require_functions(gateway, *functions)
+        activity_status = await gateway.invoke(
+            "core_completion_get_activities_completion_status",
+            {"courseid": course_id, "userid": user_id},
+        )
+        course_status = await gateway.invoke(
+            "core_completion_get_course_completion_status",
+            {"courseid": course_id, "userid": user_id},
+        )
+        return {
+            "course_id": course_id,
+            "activities": sanitise_result(activity_status),
+            "course": sanitise_result(course_status),
+            "content_is_untrusted": True,
+        }
+
+    async def list_notifications(
+        self, status: str = "unread", offset: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        if status not in {"unread", "read", "all"}:
+            raise ValueError("status debe ser unread, read o all")
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("offset/limit no son válidos")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        arguments: dict[str, Any] = {
+            "useridto": user_id,
+            "newestfirst": True,
+            "limit": limit,
+            "offset": offset,
+        }
+        if status != "all":
+            arguments["status"] = status
+        return await self.call_student_read("message_popup_get_popup_notifications", arguments)
+
+    async def list_calendar_events(
+        self,
+        start: int,
+        end: int,
+        course_ids: list[int] | None = None,
+        include_user_events: bool = True,
+        include_site_events: bool = True,
+    ) -> dict[str, Any]:
+        if start < 0 or end <= start:
+            raise ValueError("El intervalo del calendario no es válido")
+        ids = course_ids or []
+        if len(ids) > 100 or any(isinstance(value, bool) or value <= 0 for value in ids):
+            raise ValueError("course_ids contiene identificadores no válidos")
+        return await self.call_student_read(
+            "core_calendar_get_calendar_events",
+            {
+                "events": {
+                    "eventids": [],
+                    "courseids": ids,
+                    "groupids": [],
+                    "categoryids": [],
+                },
+                "options": {
+                    "userevents": include_user_events,
+                    "siteevents": include_site_events,
+                    "timestart": start,
+                    "timeend": end,
+                    "ignorehidden": False,
+                },
+            },
+        )
+
+    async def list_my_badges(
+        self, course_id: int = 0, page: int = 0, per_page: int = 50
+    ) -> dict[str, Any]:
+        if course_id < 0 or page < 0 or not 1 <= per_page <= 100:
+            raise ValueError("course_id/page/per_page no son válidos")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        return await self.call_student_read(
+            "core_badges_get_user_badges",
+            {
+                "userid": user_id,
+                "courseid": course_id,
+                "page": page,
+                "perpage": per_page,
+                "search": "",
+                "onlypublic": False,
+            },
+        )
+
+    async def get_private_files_info(self) -> dict[str, Any]:
+        return await self.call_student_read("core_user_get_private_files_info", {})
+
+    async def get_quiz_attempt_review(self, attempt_id: int, page: int = -1) -> dict[str, Any]:
+        if attempt_id <= 0 or page < -1:
+            raise ValueError("attempt_id/page no son válidos")
+        return await self.call_student_read(
+            "mod_quiz_get_attempt_review",
+            {"attemptid": attempt_id, "page": page},
+        )
+
+    async def get_quiz_best_grade(self, quiz_id: int) -> dict[str, Any]:
+        if quiz_id <= 0:
+            raise ValueError("quiz_id debe ser positivo")
+        return await self.call_student_read(
+            "mod_quiz_get_user_best_grade",
+            {"quizid": quiz_id, "userid": 0},
+        )
+
+    async def preview_create_personal_calendar_event(
+        self,
+        name: str,
+        timestart: int,
+        description: str = "",
+        duration: int = 0,
+        repeats: int = 0,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "core_webservice_get_site_info",
+            "core_calendar_get_calendar_access_information",
+            "core_calendar_get_allowed_event_types",
+            "core_calendar_create_calendar_events",
+        )
+        request = {
+            "name": name,
+            "timestart": timestart,
+            "description": description,
+            "duration": duration,
+            "repeats": repeats,
+        }
+        context = await moodle_preview_create_personal_calendar_event(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.create_personal_calendar_event", request, context
+        )
+
+    async def create_personal_calendar_event(
+        self,
+        name: str,
+        timestart: int,
+        confirmation_token: str,
+        description: str = "",
+        duration: int = 0,
+        repeats: int = 0,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {
+            "name": name,
+            "timestart": timestart,
+            "description": description,
+            "duration": duration,
+            "repeats": repeats,
+        }
+        context = await moodle_preview_create_personal_calendar_event(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.create_personal_calendar_event",
+            request,
+            context,
+        )
+        try:
+            return await moodle_create_personal_calendar_event(
+                gateway.invoke,
+                **request,
+                expected_owner_user_id=int(context["owner_user_id"]),
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("create_personal_calendar_event")
+
+    async def preview_delete_personal_calendar_event(
+        self, event_id: int, scope: str = "single"
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "core_webservice_get_site_info",
+            "core_calendar_get_calendar_event_by_id",
+            "core_calendar_get_calendar_access_information",
+            "core_calendar_delete_calendar_events",
+        )
+        request = {"event_id": event_id, "scope": scope}
+        context = await moodle_preview_delete_personal_calendar_event(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.delete_personal_calendar_event", request, context
+        )
+
+    async def delete_personal_calendar_event(
+        self, event_id: int, scope: str, confirmation_token: str
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {"event_id": event_id, "scope": scope}
+        context = await moodle_preview_delete_personal_calendar_event(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.delete_personal_calendar_event",
+            request,
+            context,
+        )
+        try:
+            return await moodle_delete_personal_calendar_event(
+                gateway.invoke,
+                **request,
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("delete_personal_calendar_event")
+
+    async def preview_create_forum_discussion(
+        self,
+        course_id: int,
+        forum_id: int,
+        subject: str,
+        message: str,
+        group_id: int = 0,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "mod_forum_get_forums_by_courses",
+            "mod_forum_get_forum_access_information",
+            "core_group_get_activity_groupmode",
+            "core_group_get_activity_allowed_groups",
+            "mod_forum_can_add_discussion",
+            "mod_forum_add_discussion",
+        )
+        request = {
+            "course_id": course_id,
+            "forum_id": forum_id,
+            "subject": subject,
+            "message": message,
+            "group_id": group_id,
+        }
+        context = await moodle_preview_create_forum_discussion(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.create_forum_discussion", request, context
+        )
+
+    async def create_forum_discussion(
+        self,
+        course_id: int,
+        forum_id: int,
+        subject: str,
+        message: str,
+        group_id: int,
+        confirmation_token: str,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {
+            "course_id": course_id,
+            "forum_id": forum_id,
+            "subject": subject,
+            "message": message,
+            "group_id": group_id,
+        }
+        context = await moodle_preview_create_forum_discussion(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.create_forum_discussion",
+            request,
+            context,
+        )
+        try:
+            return await moodle_create_forum_discussion(
+                gateway.invoke,
+                forum_id=forum_id,
+                subject=subject,
+                message=message,
+                group_id=int(context["resolved_group_id"]),
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("create_forum_discussion")
+
+    async def preview_reply_forum_post(
+        self,
+        course_id: int,
+        forum_id: int,
+        parent_post_id: int,
+        message: str,
+        subject: str | None = None,
+        group_id: int = 0,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "mod_forum_get_forums_by_courses",
+            "mod_forum_get_forum_access_information",
+            "mod_forum_get_discussion_post",
+            "mod_forum_get_forum_discussions",
+            "core_group_get_activity_groupmode",
+            "core_group_get_activity_allowed_groups",
+            "mod_forum_add_discussion_post",
+        )
+        request = {
+            "course_id": course_id,
+            "forum_id": forum_id,
+            "parent_post_id": parent_post_id,
+            "message": message,
+            "subject": subject,
+            "group_id": group_id,
+        }
+        context = await moodle_preview_reply_forum_post(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.reply_forum_post", request, context
+        )
+
+    async def reply_forum_post(
+        self,
+        course_id: int,
+        forum_id: int,
+        parent_post_id: int,
+        message: str,
+        confirmation_token: str,
+        subject: str | None = None,
+        group_id: int = 0,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {
+            "course_id": course_id,
+            "forum_id": forum_id,
+            "parent_post_id": parent_post_id,
+            "message": message,
+            "subject": subject,
+            "group_id": group_id,
+        }
+        context = await moodle_preview_reply_forum_post(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.reply_forum_post",
+            request,
+            context,
+        )
+        try:
+            return await moodle_reply_forum_post(
+                gateway.invoke,
+                parent_post_id=parent_post_id,
+                subject=str(context["subject"]),
+                message=message,
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("reply_forum_post")
+
+    async def preview_submit_choice_response(
+        self,
+        course_id: int,
+        choice_id: int,
+        option_texts: list[str],
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "mod_choice_get_choices_by_courses",
+            "mod_choice_get_choice_options",
+            "mod_choice_submit_choice_response",
+        )
+        request = {
+            "course_id": course_id,
+            "choice_id": choice_id,
+            "option_texts": option_texts,
+        }
+        context = await moodle_preview_submit_choice_response(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.submit_choice_response", request, context
+        )
+
+    async def submit_choice_response(
+        self,
+        course_id: int,
+        choice_id: int,
+        option_texts: list[str],
+        confirmation_token: str,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {
+            "course_id": course_id,
+            "choice_id": choice_id,
+            "option_texts": option_texts,
+        }
+        context = await moodle_preview_submit_choice_response(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.submit_choice_response",
+            request,
+            context,
+        )
+        try:
+            return await moodle_submit_choice_response(
+                gateway.invoke,
+                choice_id=choice_id,
+                option_ids=[int(value) for value in context["option_ids"]],
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("submit_choice_response")
+
+    async def preview_cancel_choice_response(
+        self, course_id: int, choice_id: int
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "mod_choice_get_choices_by_courses",
+            "mod_choice_get_choice_options",
+            "mod_choice_delete_choice_responses",
+        )
+        request = {"course_id": course_id, "choice_id": choice_id}
+        context = await moodle_preview_cancel_choice_response(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.cancel_choice_response", request, context
+        )
+
+    async def cancel_choice_response(
+        self, course_id: int, choice_id: int, confirmation_token: str
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {"course_id": course_id, "choice_id": choice_id}
+        context = await moodle_preview_cancel_choice_response(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.cancel_choice_response",
+            request,
+            context,
+        )
+        try:
+            return await moodle_cancel_choice_response(
+                gateway.invoke,
+                choice_id=choice_id,
+                client_request_id=f"mcp-{secrets.token_hex(12)}",
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ContextualActionError):
+            return _unknown_contextual_result("cancel_choice_response")
 
     async def list_courses(self, include_archived: bool = False) -> list[dict[str, Any]]:
         courses = await self._campus().list_courses(include_archived)
@@ -288,15 +1021,32 @@ class UscService:
         conversation_type: int | None,
         favourites: bool | None,
     ) -> dict[str, Any]:
+        del offset, limit, conversation_type, favourites
+        raise CampusCapabilityUnavailable(
+            "Moodle puede crear y marcar como favorita una conversación consigo mismo al listar "
+            "conversaciones. Usa list_messages, que emplea una lectura sin ese efecto lateral."
+        )
+
+    async def list_messages(
+        self,
+        direction: str,
+        message_type: str,
+        read_status: str,
+        offset: int,
+        limit: int,
+        newest: bool,
+    ) -> dict[str, Any]:
         gateway = self._campus()
         identity = await gateway.status()
-        return await moodle_list_conversations(
+        return await moodle_list_messages(
             gateway.invoke,
             user_id=int(identity["user_id"]),
+            direction=direction,
+            message_type=message_type,
+            read_status=read_status,
             offset=offset,
             limit=limit,
-            conversation_type=conversation_type,
-            favourites=favourites,
+            newest=newest,
         )
 
     async def list_conversation_messages(
@@ -342,12 +1092,83 @@ class UscService:
     async def list_discussion_posts(
         self, discussion_id: int, offset: int, limit: int
     ) -> dict[str, Any]:
+        del discussion_id, offset, limit
+        raise CampusCapabilityUnavailable(
+            "Moodle puede marcar publicaciones como leídas al obtener una discusión. Usa "
+            "preview_inspect_discussion_posts y después inspect_discussion_posts."
+        )
+
+    async def _inspect_discussion_posts(
+        self, discussion_id: int, offset: int, limit: int
+    ) -> dict[str, Any]:
         return await moodle_list_discussion_posts(
             self._campus().invoke,
             discussion_id=discussion_id,
             offset=offset,
             limit=limit,
         )
+
+    async def inspect_discussion_posts(
+        self,
+        discussion_id: int,
+        offset: int,
+        limit: int,
+        confirmation_token: str | None,
+    ) -> dict[str, Any]:
+        if discussion_id <= 0:
+            raise ValueError("discussion_id debe ser positivo")
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("offset/limit no son válidos")
+        payload = {
+            "discussion_id": discussion_id,
+            "offset": offset,
+            "limit": limit,
+        }
+        gateway = self._campus()
+        if confirmation_token is None:
+            await _require_functions(gateway, "mod_forum_get_discussion_posts")
+            confirmation = await _issue_action_confirmation(
+                gateway,
+                "forum.inspect_posts_stateful",
+                payload,
+            )
+            return {
+                "preview": True,
+                **payload,
+                "warning": (
+                    "Moodle puede marcar como leídas las publicaciones devueltas y registrar "
+                    "seguimiento. Esta vista previa no abre la discusión."
+                ),
+                **confirmation,
+            }
+        await _consume_action_confirmation(
+            gateway,
+            confirmation_token,
+            "forum.inspect_posts_stateful",
+            payload,
+        )
+        try:
+            result = await moodle_list_discussion_posts(
+                gateway.invoke,
+                discussion_id=discussion_id,
+                offset=offset,
+                limit=limit,
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except CampusError:
+            return {
+                "request_may_have_been_sent": True,
+                "outcome": "unknown",
+                "do_not_retry": True,
+                "discussion_id": discussion_id,
+                "warning": (
+                    "Moodle puede haber actualizado el estado de lectura. Comprueba la "
+                    "discusión antes de repetir la operación."
+                ),
+            }
+        result["stateful_inspection_confirmed"] = True
+        return result
 
     async def list_course_contents(
         self,
@@ -418,12 +1239,15 @@ class UscService:
         }
 
     async def list_assignments(self, course_ids: list[int] | None) -> dict[str, Any]:
-        return await moodle_list_assignments(self._campus().invoke, course_ids)
+        gateway = self._campus()
+        await _require_functions(gateway, "mod_assign_get_assignments")
+        return await moodle_list_assignments(gateway.invoke, course_ids)
 
     async def get_submission_status(
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -471,6 +1295,7 @@ class UscService:
         course_module_id: int | None = None,
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -558,6 +1383,7 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -613,6 +1439,7 @@ class UscService:
     ) -> dict[str, Any]:
         inspected = inspect_upload_files(self.settings, file_paths)
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         try:
             status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         except CampusCapabilityUnavailable as exc:
@@ -709,6 +1536,7 @@ class UscService:
         ]
         payload = {"assignment_id": assignment_id, "files": public_files}
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         await _consume_action_confirmation(
             gateway,
             confirmation_token,
@@ -731,6 +1559,7 @@ class UscService:
         self, assignment_id: int, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         try:
             status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         except CampusCapabilityUnavailable as exc:
@@ -787,6 +1616,7 @@ class UscService:
     ) -> dict[str, Any]:
         payload = {"assignment_id": assignment_id}
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         await _consume_action_confirmation(
             gateway,
             confirmation_token,
@@ -806,6 +1636,7 @@ class UscService:
         course_module_id: int | None = None,
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -883,6 +1714,7 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -934,6 +1766,7 @@ class UscService:
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1006,6 +1839,7 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1045,6 +1879,7 @@ class UscService:
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
+        _require_rest_for_assignment(gateway)
         if assignment_id is None:
             if course_module_id is None:
                 raise ValueError("Se requiere assignment_id o course_module_id")
@@ -1206,7 +2041,19 @@ class UscService:
         page: int,
         preflight_data: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        gateway = self._campus()
+        del attempt_id, page, preflight_data
+        raise CampusCapabilityUnavailable(
+            "Consultar una página de intento puede procesar automáticamente un timeout y cambiar "
+            "su estado. Usa preview_inspect_quiz_attempt y después inspect_quiz_attempt."
+        )
+
+    async def _inspect_quiz_attempt_page(
+        self,
+        gateway: Any,
+        attempt_id: int,
+        page: int,
+        preflight_data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         try:
             return await MoodleQuizClient(gateway.invoke).get_attempt_page(
                 attempt_id,
@@ -1222,7 +2069,18 @@ class UscService:
     async def get_quiz_attempt_summary(
         self, attempt_id: int, preflight_data: dict[str, Any] | None
     ) -> dict[str, Any]:
-        gateway = self._campus()
+        del attempt_id, preflight_data
+        raise CampusCapabilityUnavailable(
+            "Consultar el resumen puede procesar automáticamente un timeout y cambiar el intento. "
+            "Usa preview_inspect_quiz_attempt con summary=true y después inspect_quiz_attempt."
+        )
+
+    async def _inspect_quiz_attempt_summary(
+        self,
+        gateway: Any,
+        attempt_id: int,
+        preflight_data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         try:
             return await MoodleQuizClient(gateway.invoke).get_attempt_summary(
                 attempt_id,
@@ -1230,6 +2088,77 @@ class UscService:
             )
         except CampusCapabilityUnavailable as exc:
             return await _session_forms_or_raise(gateway, exc).inspect_quiz_finish(attempt_id)
+
+    async def inspect_quiz_attempt(
+        self,
+        attempt_id: int,
+        page: int,
+        summary: bool,
+        preflight_data: dict[str, Any] | None,
+        confirmation_token: str | None,
+    ) -> dict[str, Any]:
+        if attempt_id <= 0 or page < 0:
+            raise ValueError("attempt_id/page no son válidos")
+        payload = {
+            "attempt_id": attempt_id,
+            "page": page,
+            "summary": summary,
+            "preflight_data": dict(preflight_data or {}),
+        }
+        gateway = self._campus()
+        if confirmation_token is None:
+            function = "mod_quiz_get_attempt_summary" if summary else "mod_quiz_get_attempt_data"
+            form_factory = getattr(gateway, "session_forms", None)
+            if not (form_factory and form_factory() is not None):
+                await _require_functions(gateway, function)
+            confirmation = await _issue_action_confirmation(
+                gateway,
+                "quiz.inspect_stateful",
+                payload,
+            )
+            return {
+                "preview": True,
+                **payload,
+                "warning": (
+                    "Moodle puede procesar el vencimiento del tiempo al abrir esta vista y pasar "
+                    "el intento a overdue, finished o abandoned. Esta previsualización no abre "
+                    "el intento; la segunda llamada sí puede cambiar su estado."
+                ),
+                **confirmation,
+            }
+        await _consume_action_confirmation(
+            gateway,
+            confirmation_token,
+            "quiz.inspect_stateful",
+            payload,
+        )
+        try:
+            if summary:
+                result = await self._inspect_quiz_attempt_summary(
+                    gateway, attempt_id, preflight_data
+                )
+            else:
+                result = await self._inspect_quiz_attempt_page(
+                    gateway,
+                    attempt_id,
+                    page,
+                    preflight_data,
+                )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except CampusError:
+            return {
+                "request_may_have_been_sent": True,
+                "outcome": "unknown",
+                "do_not_retry": True,
+                "attempt_id": attempt_id,
+                "warning": (
+                    "No se pudo comprobar si Moodle procesó el timeout. Revisa el intento "
+                    "manualmente antes de repetir cualquier acción."
+                ),
+            }
+        result["stateful_inspection_confirmed"] = True
+        return result
 
     async def preview_start_quiz(
         self,
@@ -1241,7 +2170,6 @@ class UscService:
         gateway = self._campus()
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
-        form_inspection = None
         if form_client is not None:
             if quiz_id is not None:
                 raise ValueError(
@@ -1251,7 +2179,6 @@ class UscService:
                 raise ValueError(
                     "La sesión HTTP necesita course_module_id para localizar el cuestionario."
                 )
-            form_inspection = await form_client.inspect_quiz_start(course_module_id)
         else:
             if quiz_id is None:
                 raise ValueError("El token REST requiere quiz_id")
@@ -1269,10 +2196,12 @@ class UscService:
             "course_module_id": course_module_id,
             "force_new": force_new,
             "preflight_fields": sorted(payload["preflight_data"]),
-            "form_inspection": form_inspection,
+            "form_inspection": None,
             "warning": (
-                "Iniciar un intento puede activar inmediatamente su temporizador. Confirma en "
-                "un mensaje nuevo que deseas comenzar este cuestionario."
+                "Iniciar un intento puede activar inmediatamente su temporizador. En modo "
+                "sesión, la vista previa tampoco abre la página del cuestionario: esa apertura "
+                "confirmada puede registrar una vista o procesar un intento caducado. Confirma "
+                "en un mensaje nuevo que deseas continuar."
             ),
             "security_note": QUIZ_SECURITY_NOTE,
             **confirmation,
@@ -1338,9 +2267,7 @@ class UscService:
         form_inspection = None
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
-        if form_client is not None:
-            form_inspection = await form_client.inspect_quiz_page(attempt_id, page)
-        else:
+        if form_client is None:
             await _require_functions(gateway, "mod_quiz_save_attempt")
         payload = {
             "attempt_id": attempt_id,
@@ -1355,7 +2282,11 @@ class UscService:
             "responses": payload["responses"],
             "preflight_fields": sorted(payload["preflight_data"]),
             "form_inspection": form_inspection,
-            "warning": "Guardar modifica el intento en curso; verifica los campos y valores.",
+            "warning": (
+                "Guardar modifica el intento. En modo sesión la vista previa no abre la página "
+                "porque Moodle podría procesar un timeout; valida antes los campos mediante el "
+                "flujo confirmado inspect_quiz_attempt."
+            ),
             "security_note": QUIZ_SECURITY_NOTE,
             **confirmation,
         }
@@ -1411,9 +2342,7 @@ class UscService:
         form_inspection = None
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
-        if form_client is not None:
-            form_inspection = await form_client.inspect_quiz_finish(attempt_id)
-        else:
+        if form_client is None:
             await _require_functions(gateway, "mod_quiz_process_attempt")
         payload = {
             "attempt_id": attempt_id,

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from mcp_usc.campus import CampusCapabilityUnavailable
 from mcp_usc.confirmations import ACTION_CONFIRMATIONS
 from mcp_usc.service import UscService
 
@@ -25,6 +26,8 @@ class FakeQuizGateway:
             return {"status": True, "warnings": []}
         if function == "mod_quiz_process_attempt":
             return {"state": "finished", "warnings": []}
+        if function == "mod_quiz_get_attempt_data":
+            return {"attempt": {"id": 91, "quiz": 7, "state": "inprogress"}, "questions": []}
         raise AssertionError(function)
 
 
@@ -119,3 +122,25 @@ async def test_finish_quiz_is_a_separate_confirmed_write() -> None:
 
     assert result["finished"] is True
     assert gateway.calls[0][0] == "mod_quiz_process_attempt"
+
+
+async def test_quiz_attempt_inspection_requires_confirmation_before_stateful_read() -> None:
+    gateway = FakeQuizGateway()
+    service = _service_with(gateway)
+
+    with pytest.raises(CampusCapabilityUnavailable, match="preview_inspect_quiz_attempt"):
+        await service.get_quiz_attempt_page(91, 0, None)
+
+    preview = await service.inspect_quiz_attempt(91, 0, False, None, None)
+    assert preview["preview"] is True
+    assert gateway.calls == []
+
+    result = await service.inspect_quiz_attempt(
+        91,
+        0,
+        False,
+        None,
+        preview["confirmation_token"],
+    )
+    assert result["stateful_inspection_confirmed"] is True
+    assert gateway.calls[0][0] == "mod_quiz_get_attempt_data"

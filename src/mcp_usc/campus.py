@@ -23,7 +23,7 @@ from .session_forms import FormResponse, MoodleSessionForms
 from .settings import Settings
 
 SESSION_CREDENTIAL_NAME = "moodle-session"
-_USER_AGENT = "mcp-usc/0.1 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = "mcp-usc/0.3 (+https://github.com/PabloPC05/mcp-usc)"
 _ANNOUNCEMENT_TERMS = (
     "announcement",
     "anuncio",
@@ -38,7 +38,19 @@ _SESSKEY_PATTERNS = (
     re.compile(r"sesskey=([A-Za-z0-9_-]{5,128})"),
 )
 _USER_ID_PATTERNS = (re.compile(r'["\']user(?:id|Id)["\']\s*:\s*["\']?(\d+)'),)
-_NO_HTML_FALLBACK = object()
+_MAX_JSON_RESPONSE_BYTES = 5 * 1024 * 1024
+_SESSION_UNAVAILABLE_ACTIONS = frozenset(
+    {
+        "core_calendar_create_calendar_events",
+        "core_calendar_delete_calendar_events",
+        "core_message_set_unsent_message",
+        "core_question_update_flag",
+        "mod_choice_delete_choice_responses",
+        "mod_choice_submit_choice_response",
+        "mod_forum_add_discussion",
+        "mod_forum_add_discussion_post",
+    }
+)
 
 
 class CampusError(RuntimeError):
@@ -75,6 +87,10 @@ class CampusGateway(ABC):
 
     async def require_functions(self, functions: set[str]) -> None:
         """Fail before preview when a transport knows required functions are unavailable."""
+        return None
+
+    async def available_functions(self) -> set[str] | None:
+        """Return functions advertised by the configured token, if discoverable."""
         return None
 
     async def invoke_course_module(self, function: str, arguments: Mapping[str, Any]) -> Any:
@@ -136,42 +152,18 @@ def _moodle_file_url(url: str, base_url: str, *, webservice: bool) -> str:
     raise ValueError("La URL no corresponde a un archivo Moodle permitido")
 
 
-def _session_resource_url(url: str, base_url: str) -> str:
-    try:
-        return _moodle_file_url(url, base_url, webservice=False)
-    except ValueError:
-        pass
-    parsed = urlparse(url)
-    base = urlparse(base_url)
-    allowed_query = {"chapterid", "forcedownload", "id"}
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    module_path = re.fullmatch(r"/mod/(book|folder|page|resource|url)/view\.php", parsed.path)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != base.hostname
-        or parsed.port not in (None, 443)
-        or parsed.username
-        or parsed.password
-        or parsed.fragment
-        or not module_path
-        or set(query) - allowed_query
-    ):
-        raise ValueError("La URL no corresponde a un recurso Moodle permitido")
-    return parsed.geturl()
-
-
 async def _read_limited_response(response: httpx.Response, max_bytes: int) -> bytes:
     if not 1 <= max_bytes <= 100 * 1024 * 1024:
         raise ValueError("max_bytes debe estar entre 1 y 104857600")
     declared = response.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > max_bytes:
-        raise CampusProtocolError("El recurso supera el límite de descarga configurado.")
+        raise CampusProtocolError("La respuesta supera el límite de bytes configurado.")
     chunks: list[bytes] = []
     size = 0
     async for chunk in response.aiter_bytes():
         size += len(chunk)
         if size > max_bytes:
-            raise CampusProtocolError("El recurso supera el límite de descarga configurado.")
+            raise CampusProtocolError("La respuesta supera el límite de bytes configurado.")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -362,28 +354,37 @@ class RestMoodleGateway(CampusGateway):
         if not token:
             raise AuthenticationRequired("No hay un token de Moodle configurado.")
         form = {
+            **_flatten_form(arguments or {}),
             "wstoken": token,
             "wsfunction": function,
             "moodlewsrestformat": "json",
-            **_flatten_form(arguments or {}),
         }
         try:
-            async with httpx.AsyncClient(
-                timeout=self.settings.request_timeout_seconds,
-                follow_redirects=False,
-                headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
-            ) as client:
-                response = await client.post(self._endpoint, data=form)
+            async with (
+                httpx.AsyncClient(
+                    timeout=self.settings.request_timeout_seconds,
+                    follow_redirects=False,
+                    headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
+                ) as client,
+                client.stream("POST", self._endpoint, data=form) as response,
+            ):
+                if response.is_redirect:
+                    raise AuthenticationRequired(
+                        "Moodle redirigió la petición REST; revisa el token."
+                    )
+                if response.status_code in {401, 403}:
+                    raise AuthenticationRequired("Moodle rechazó el token configurado.")
+                if response.status_code >= 400:
+                    raise CampusError(
+                        f"El Campus Virtual devolvió un error HTTP {response.status_code}."
+                    )
+                content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
+        except CampusError:
+            raise
         except httpx.HTTPError as exc:
             raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
-        if response.is_redirect:
-            raise AuthenticationRequired("Moodle redirigió la petición REST; revisa el token.")
-        if response.status_code in {401, 403}:
-            raise AuthenticationRequired("Moodle rechazó el token configurado.")
-        if response.status_code >= 400:
-            raise CampusError(f"El Campus Virtual devolvió un error HTTP {response.status_code}.")
         try:
-            payload = response.json()
+            payload = json.loads(content)
         except (json.JSONDecodeError, ValueError) as exc:
             raise CampusProtocolError("Moodle devolvió una respuesta REST no válida.") from exc
         if isinstance(payload, Mapping) and (payload.get("exception") or payload.get("errorcode")):
@@ -498,6 +499,17 @@ class RestMoodleGateway(CampusGateway):
             raise CampusCapabilityUnavailable(
                 "El token de Moodle no habilita estas funciones requeridas: " + ", ".join(missing)
             )
+
+    async def available_functions(self) -> set[str] | None:
+        info = await self._info()
+        raw_functions = info.get("functions")
+        if not isinstance(raw_functions, list):
+            raise CampusProtocolError("Moodle no informó las funciones habilitadas para el token.")
+        return {
+            str(item.get("name") or "")
+            for item in raw_functions
+            if isinstance(item, Mapping) and item.get("name")
+        }
 
     async def status(self) -> dict[str, Any]:
         info = await self._info()
@@ -720,7 +732,9 @@ class HttpSessionMoodleGateway(CampusGateway):
     async def _session_context(self) -> _SessionContext:
         if self._context is not None:
             return self._context
-        response = await self._get("my/")
+        # Moodle's dashboard records a dashboard_viewed event even on GET. The preferences
+        # landing page exposes the same header session context without that stateful event.
+        response = await self._get("user/preferences.php")
         body = response.text
         soup = BeautifulSoup(body, "html.parser")
         if _looks_like_login(soup, response.url):
@@ -729,7 +743,9 @@ class HttpSessionMoodleGateway(CampusGateway):
             )
         sesskey = _extract_sesskey(soup, body)
         if not sesskey:
-            raise CampusProtocolError("No se encontró la clave de sesión en el panel de Moodle.")
+            raise CampusProtocolError(
+                "No se encontró la clave de sesión en las preferencias de Moodle."
+            )
         user_id = _extract_user_id(soup, body)
         if user_id <= 0:
             raise CampusProtocolError("No se encontró el identificador del usuario en Moodle.")
@@ -748,8 +764,10 @@ class HttpSessionMoodleGateway(CampusGateway):
         cookie = self._session_cookie()
         request_payload = [{"index": 0, "methodname": function, "args": dict(arguments)}]
         try:
-            async with self._client(cookie) as client:
-                response = await client.post(
+            async with (
+                self._client(cookie) as client,
+                client.stream(
+                    "POST",
                     self._url(
                         "lib/ajax/service.php", {"sesskey": context.sesskey, "info": function}
                     ),
@@ -759,13 +777,17 @@ class HttpSessionMoodleGateway(CampusGateway):
                         "Content-Type": "application/json",
                         "X-Requested-With": "XMLHttpRequest",
                     },
-                )
+                ) as response,
+            ):
+                self._remember_rotated_cookie(response, cookie)
+                self._ensure_authenticated_response(response)
+                content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
+        except CampusError:
+            raise
         except httpx.HTTPError as exc:
             raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
-        self._remember_rotated_cookie(response, cookie)
-        self._ensure_authenticated_response(response)
         try:
-            envelope = response.json()
+            envelope = json.loads(content)
         except (json.JSONDecodeError, ValueError) as exc:
             raise CampusProtocolError("Moodle devolvió una respuesta AJAX no válida.") from exc
         if not isinstance(envelope, list) or len(envelope) != 1:
@@ -780,101 +802,23 @@ class HttpSessionMoodleGateway(CampusGateway):
         return item["data"]
 
     async def invoke(self, function: str, arguments: Mapping[str, Any] | None = None) -> Any:
-        values = arguments or {}
-        try:
-            return await self._ajax(function, values)
-        except CampusCapabilityUnavailable as exc:
-            fallback = await self._html_external(function, values)
-            if fallback is _NO_HTML_FALLBACK:
-                raise exc
-            return fallback
+        return await self._ajax(function, arguments or {})
 
     async def invoke_course_module(self, function: str, arguments: Mapping[str, Any]) -> Any:
-        fallback = await self._html_external(function, arguments)
-        if fallback is _NO_HTML_FALLBACK:
-            raise CampusProtocolError(
-                f"No hay una lectura HTML segura por course_module_id para {function}."
-            )
-        return fallback
-
-    async def _html_external(self, function: str, arguments: Mapping[str, Any]) -> Any:
-        if function == "core_course_get_contents":
-            course_id = int(arguments.get("courseid") or 0)
-            if course_id <= 0:
-                raise ValueError("courseid debe ser positivo")
-            page = await self._get("course/view.php", {"id": course_id})
-            sections = _course_sections_from_html(page.text, str(page.url), course_id)
-            section_id = _section_filter(arguments.get("options"))
-            if section_id is not None:
-                sections = [section for section in sections if section.get("id") == section_id]
-            return sections
-        if function in {
-            "mod_forum_get_forums_by_courses",
-            "mod_assign_get_assignments",
-            "mod_quiz_get_quizzes_by_courses",
-        }:
-            course_ids = _positive_ids(arguments.get("courseids"), "courseids")
-            if not course_ids:
-                course_ids = [
-                    int(course["id"])
-                    for course in await self.list_courses(include_archived=False)
-                    if int(course.get("id") or 0) > 0
-                ]
-            course_sections: dict[int, list[dict[str, Any]]] = {}
-            for course_id in course_ids:
-                page = await self._get("course/view.php", {"id": course_id})
-                course_sections[course_id] = _course_sections_from_html(
-                    page.text, str(page.url), course_id
-                )
-            if function == "mod_forum_get_forums_by_courses":
-                return _activities_from_sections(course_sections, "forum")
-            if function == "mod_quiz_get_quizzes_by_courses":
-                return {"quizzes": _activities_from_sections(course_sections, "quiz")}
-            courses = []
-            for course_id, sections in course_sections.items():
-                courses.append(
-                    {
-                        "id": course_id,
-                        "fullname": "",
-                        "assignments": _activities_from_sections({course_id: sections}, "assign"),
-                    }
-                )
-            return {"courses": courses, "warnings": []}
-        if function == "mod_forum_get_forum_discussions":
-            forum_cmid = int(arguments.get("forumid") or 0)
-            if forum_cmid <= 0:
-                raise ValueError("forumid debe ser positivo")
-            page = await self._get("mod/forum/view.php", {"id": forum_cmid})
-            discussions = _forum_discussions_from_html(page.text, str(page.url), forum_cmid)
-            page_number = max(0, int(arguments.get("page") or 0))
-            per_page = max(1, min(100, int(arguments.get("perpage") or 20)))
-            start = page_number * per_page
-            return {"discussions": discussions[start : start + per_page], "warnings": []}
-        if function == "mod_forum_get_discussion_posts":
-            discussion_id = int(arguments.get("discussionid") or 0)
-            if discussion_id <= 0:
-                raise ValueError("discussionid debe ser positivo")
-            page = await self._get("mod/forum/discuss.php", {"d": discussion_id})
-            posts = _forum_posts_from_html(page.text, str(page.url), discussion_id)
-            direction = str(arguments.get("sortdirection") or "ASC").upper()
-            posts.sort(key=lambda item: int(item.get("created") or 0), reverse=direction == "DESC")
-            return {"posts": posts, "warnings": []}
-        if function == "mod_quiz_get_user_attempts":
-            quiz_cmid = int(arguments.get("quizid") or 0)
-            if quiz_cmid <= 0:
-                raise ValueError("quizid debe ser positivo")
-            page = await self._get("mod/quiz/view.php", {"id": quiz_cmid})
-            attempts = _quiz_attempts_from_html(page.text, str(page.url), quiz_cmid)
-            status = str(arguments.get("status") or "all")
-            if status == "finished":
-                attempts = [attempt for attempt in attempts if attempt.get("state") == "finished"]
-            elif status == "unfinished":
-                attempts = [attempt for attempt in attempts if attempt.get("state") != "finished"]
-            return {"attempts": attempts, "warnings": []}
-        return _NO_HTML_FALLBACK
+        del arguments
+        raise CampusCapabilityUnavailable(
+            f"La sesión HTTP no ofrece una lectura sin efectos laterales para {function}; "
+            "usa un token REST de mínimo privilegio."
+        )
 
     async def fetch_file(self, url: str, max_bytes: int) -> tuple[bytes, str, str]:
-        safe_url = _session_resource_url(url, self.base_url)
+        try:
+            safe_url = _moodle_file_url(url, self.base_url, webservice=False)
+        except ValueError as exc:
+            raise CampusCapabilityUnavailable(
+                "La sesión solo descarga /pluginfile.php directamente. Abrir una página "
+                "view.php puede registrar una vista o cambiar la finalización; usa REST."
+            ) from exc
         cookie = self._session_cookie()
         content: bytes | None = None
         media_type = ""
@@ -891,9 +835,16 @@ class HttpSessionMoodleGateway(CampusGateway):
                         await response.aclose()
                         if not location:
                             break
-                        target = _session_resource_url(
-                            urljoin(str(response.url), location), self.base_url
-                        )
+                        try:
+                            target = _moodle_file_url(
+                                urljoin(str(response.url), location),
+                                self.base_url,
+                                webservice=False,
+                            )
+                        except ValueError as exc:
+                            raise CampusProtocolError(
+                                "La descarga redirigió fuera de /pluginfile.php."
+                            ) from exc
                         continue
                     self._ensure_authenticated_response(response)
                     content = await _read_limited_response(response, max_bytes)
@@ -1006,12 +957,14 @@ class HttpSessionMoodleGateway(CampusGateway):
         unavailable = sorted(
             function
             for function in functions
-            if function.startswith("core_files_") or function.startswith("mod_assign_")
+            if function.startswith("core_files_")
+            or function.startswith("mod_assign_")
+            or function in _SESSION_UNAVAILABLE_ACTIONS
         )
         if unavailable:
             raise CampusCapabilityUnavailable(
-                "La sesión HTTP no expone de forma general estas funciones REST: "
-                + ", ".join(unavailable)
+                "La sesión HTTP/AJAX no expone de forma segura estas funciones; "
+                "usa un token REST de mínimo privilegio: " + ", ".join(unavailable)
             )
 
     async def status(self) -> dict[str, Any]:
@@ -1066,69 +1019,11 @@ class HttpSessionMoodleGateway(CampusGateway):
     async def announcements(
         self, courses: Sequence[Mapping[str, Any]], limit: int
     ) -> list[dict[str, Any]]:
-        _validate_limit(limit, 100)
-        await self._session_context()
-        found: list[dict[str, Any]] = []
-        seen_discussions: set[int] = set()
-        for course in courses:
-            if len(found) >= limit:
-                break
-            try:
-                course_id = int(course.get("id", 0))
-            except (TypeError, ValueError):
-                continue
-            if course_id <= 0:
-                continue
-            course_name = str(course.get("fullname") or course.get("full_name") or "")
-            course_page = await self._get("course/view.php", {"id": course_id})
-            forums = _announcement_forum_links(course_page.text, str(course_page.url))
-            for forum_name, forum_url in forums:
-                if len(found) >= limit:
-                    break
-                forum_page = await self._get_absolute(forum_url)
-                discussions = _discussion_links(forum_page.text, str(forum_page.url))
-                for discussion_id, title, discussion_url, summary in discussions:
-                    if len(found) >= limit or discussion_id in seen_discussions:
-                        continue
-                    seen_discussions.add(discussion_id)
-                    item = {
-                        "id": discussion_id,
-                        "discussion": discussion_id,
-                        "name": title,
-                        "course_id": course_id,
-                        "course_name": course_name,
-                        "forum_name": forum_name,
-                        "url": discussion_url,
-                        **summary,
-                    }
-                    try:
-                        detail_page = await self._get_absolute(discussion_url)
-                        item.update(_discussion_detail(detail_page.text))
-                    except AuthenticationRequired:
-                        raise
-                    except CampusError:
-                        # The listing still provides a useful, attributable announcement.
-                        pass
-                    found.append(item)
-        return sorted(
-            found,
-            key=lambda item: int(item.get("timemodified") or item.get("created") or 0),
-            reverse=True,
-        )[:limit]
-
-    async def _get_absolute(self, url: str) -> httpx.Response:
-        safe_url = validate_usc_url(url, campus=True)
-        if urlparse(safe_url).netloc != urlparse(self.base_url).netloc:
-            raise CampusProtocolError("Moodle incluyó un enlace fuera del Campus Virtual esperado.")
-        cookie = self._session_cookie()
-        try:
-            async with self._client(cookie) as client:
-                response = await client.get(safe_url)
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
-        self._remember_rotated_cookie(response, cookie)
-        self._ensure_authenticated_response(response)
-        return response
+        del courses, limit
+        raise CampusCapabilityUnavailable(
+            "Leer anuncios mediante páginas HTML puede registrar vistas y marcar posts como "
+            "leídos; usa un token REST de mínimo privilegio."
+        )
 
     async def search_message_contacts(self, query: str, limit: int) -> list[dict[str, Any]]:
         search = _validate_contact_search(query, limit)
@@ -1333,42 +1228,6 @@ def _discussion_detail(html: str) -> dict[str, Any]:
         result["created"] = created
         result.setdefault("timemodified", created)
     return result
-
-
-def _positive_ids(value: Any, name: str) -> list[int]:
-    if value in (None, []):
-        return []
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise ValueError(f"{name} debe ser una lista de identificadores")
-    ids: list[int] = []
-    for raw in value:
-        if isinstance(raw, bool):
-            raise ValueError(f"{name} contiene un identificador no válido")
-        try:
-            item = int(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} contiene un identificador no válido") from exc
-        if item <= 0:
-            raise ValueError(f"{name} contiene un identificador no válido")
-        if item not in ids:
-            ids.append(item)
-    if len(ids) > 100:
-        raise ValueError(f"{name} no puede superar 100 elementos")
-    return ids
-
-
-def _section_filter(value: Any) -> int | None:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return None
-    for option in value:
-        if not isinstance(option, Mapping) or option.get("name") != "sectionid":
-            continue
-        try:
-            section_id = int(option.get("value") or 0)
-        except (TypeError, ValueError):
-            continue
-        return section_id if section_id > 0 else None
-    return None
 
 
 def _safe_campus_link(base_url: str, href: str) -> str | None:
@@ -1631,7 +1490,9 @@ def create_campus_gateway(settings: Settings | None = None) -> CampusGateway:
 
 
 async def _cookie_is_authenticated(settings: Settings, cookie: str) -> bool:
-    dashboard = validate_usc_url(urljoin(f"{settings.moodle_url.rstrip('/')}/", "my/"), campus=True)
+    preferences = validate_usc_url(
+        urljoin(f"{settings.moodle_url.rstrip('/')}/", "user/preferences.php"), campus=True
+    )
     try:
         async with httpx.AsyncClient(
             timeout=settings.request_timeout_seconds,
@@ -1639,7 +1500,7 @@ async def _cookie_is_authenticated(settings: Settings, cookie: str) -> bool:
             cookies={"MoodleSession": cookie},
             headers={"User-Agent": _USER_AGENT, "Accept": "text/html"},
         ) as client:
-            response = await client.get(dashboard)
+            response = await client.get(preferences)
     except httpx.HTTPError:
         return False
     if response.is_redirect or response.status_code >= 400:

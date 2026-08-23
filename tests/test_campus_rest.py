@@ -1,5 +1,6 @@
 import base64
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ import respx
 from mcp_usc.campus import (
     AuthenticationRequired,
     CampusCapabilityUnavailable,
+    CampusProtocolError,
     RestMoodleGateway,
     _flatten_form,
 )
@@ -48,6 +50,27 @@ async def test_rest_status_and_secret_is_sent_in_body() -> None:
 
 
 @respx.mock
+async def test_rest_reserved_fields_cannot_override_allowlisted_function() -> None:
+    route = respx.post("https://cv.usc.es/webservice/rest/server.php").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+
+    await RestMoodleGateway(_settings()).invoke(
+        "core_user_get_user_preferences",
+        {
+            "wsfunction": "core_user_delete_users",
+            "wstoken": "attacker-token",
+            "moodlewsrestformat": "xml",
+        },
+    )
+
+    form = parse_qs(route.calls[0].request.content.decode())
+    assert form["wsfunction"] == ["core_user_get_user_preferences"]
+    assert form["wstoken"] == ["secret-token"]
+    assert form["moodlewsrestformat"] == ["json"]
+
+
+@respx.mock
 async def test_invalid_token_becomes_authentication_error() -> None:
     respx.post("https://cv.usc.es/webservice/rest/server.php").mock(
         return_value=httpx.Response(
@@ -56,6 +79,16 @@ async def test_invalid_token_becomes_authentication_error() -> None:
     )
     with pytest.raises(AuthenticationRequired):
         await RestMoodleGateway(_settings()).status()
+
+
+@respx.mock
+async def test_rest_rejects_oversized_json_before_parsing() -> None:
+    respx.post("https://cv.usc.es/webservice/rest/server.php").mock(
+        return_value=httpx.Response(200, content=b"x" * (5 * 1024 * 1024 + 1))
+    )
+
+    with pytest.raises(CampusProtocolError, match="límite de bytes"):
+        await RestMoodleGateway(_settings()).invoke("core_user_get_user_preferences", {})
 
 
 @respx.mock
