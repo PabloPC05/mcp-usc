@@ -39,6 +39,8 @@ def validate_usc_url(url: str, *, campus: bool = False) -> str:
 def html_to_text(value: str | None, *, limit: int = 8_000) -> str:
     if not value:
         return ""
+    if "<" not in value:
+        return _WHITESPACE.sub(" ", html.unescape(value)).strip()[:limit]
     soup = BeautifulSoup(value, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()

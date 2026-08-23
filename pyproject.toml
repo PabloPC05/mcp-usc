@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-usc"
-version = "0.1.0"
-description = "HTTP-first MCP server for USC Moodle and public exam schedules"
+version = "0.2.0"
+description = "HTTP-first MCP server for USC Moodle courses, collaboration, submissions, and quizzes"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

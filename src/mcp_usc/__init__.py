@@ -1,3 +1,3 @@
-"""Read-only MCP connector for Universidade de Santiago de Compostela."""
+"""HTTP-first MCP connector for Universidade de Santiago de Compostela."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
