@@ -8,6 +8,21 @@ def test_normalise_course_removes_html() -> None:
     assert result["id"] == 42
     assert result["full_name"] == "Matemáticas"
     assert result["visible"] is True
+    assert result["dashboard_hidden"] is False
+
+
+def test_normalise_course_distinguishes_visibility_from_dashboard_preference() -> None:
+    result = normalise_course(
+        {
+            "id": "43",
+            "fullname": "Álxebra",
+            "hidden": True,
+            "visible": True,
+        }
+    )
+
+    assert result["visible"] is True
+    assert result["dashboard_hidden"] is True
 
 
 def test_normalise_event_keeps_source_links_and_cleans_description() -> None:

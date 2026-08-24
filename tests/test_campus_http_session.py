@@ -159,6 +159,39 @@ async def test_session_ajax_fetches_sesskey_from_preferences_then_posts_json() -
 
 
 @respx.mock
+async def test_session_all_courses_also_includes_dashboard_hidden_courses() -> None:
+    store = MemoryCredentialStore("session-secret")
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
+    )
+    ajax = respx.post(
+        "https://cv.usc.es/lib/ajax/service.php",
+        params={
+            "sesskey": "abc123",
+            "info": "core_course_get_enrolled_courses_by_timeline_classification",
+        },
+    ).mock(
+        side_effect=[
+            httpx.Response(200, json=[{"error": False, "data": {"courses": [{"id": 7}]}}]),
+            httpx.Response(
+                200,
+                json=[{"error": False, "data": {"courses": [{"id": 7}, {"id": 8}]}}],
+            ),
+        ]
+    )
+
+    courses = await HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), store
+    ).list_courses(include_archived=True)
+
+    assert [course["id"] for course in courses] == [7, 8]
+    classifications = [
+        json.loads(call.request.content)[0]["args"]["classification"] for call in ajax.calls
+    ]
+    assert classifications == ["all", "hidden"]
+
+
+@respx.mock
 async def test_session_ajax_rejects_oversized_json_before_parsing() -> None:
     store = MemoryCredentialStore("session-secret")
     respx.get("https://cv.usc.es/user/preferences.php").mock(

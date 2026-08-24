@@ -50,6 +50,24 @@ async def test_rest_status_and_secret_is_sent_in_body() -> None:
 
 
 @respx.mock
+async def test_rest_all_courses_also_includes_dashboard_hidden_courses() -> None:
+    route = respx.post("https://cv.usc.es/webservice/rest/server.php").mock(
+        side_effect=[
+            httpx.Response(200, json={"courses": [{"id": 7}]}),
+            httpx.Response(200, json={"courses": [{"id": 7}, {"id": 8}]}),
+        ]
+    )
+
+    courses = await RestMoodleGateway(_settings()).list_courses(include_archived=True)
+
+    assert [course["id"] for course in courses] == [7, 8]
+    classifications = [
+        parse_qs(call.request.content.decode())["classification"][0] for call in route.calls
+    ]
+    assert classifications == ["all", "hidden"]
+
+
+@respx.mock
 async def test_rest_reserved_fields_cannot_override_allowlisted_function() -> None:
     route = respx.post("https://cv.usc.es/webservice/rest/server.php").mock(
         return_value=httpx.Response(200, json={"ok": True})

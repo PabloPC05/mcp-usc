@@ -301,6 +301,21 @@ def _course_is_current(course: Mapping[str, Any]) -> bool:
         return True
 
 
+def _merge_course_lists(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Merge Moodle timeline classifications without duplicating enrolments."""
+
+    courses: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for course in group:
+            course_id = str(course.get("id") or "")
+            if not course_id or course_id in seen:
+                continue
+            seen.add(course_id)
+            courses.append(dict(course))
+    return courses
+
+
 def _normalise_contacts(payload: Any, limit: int) -> list[dict[str, Any]]:
     candidates: list[Any]
     if isinstance(payload, Mapping):
@@ -548,18 +563,29 @@ class RestMoodleGateway(CampusGateway):
     async def list_courses(self, include_archived: bool = False) -> list[dict[str, Any]]:
         classification = "all" if include_archived else "inprogress"
         try:
+            arguments = {
+                "classification": classification,
+                "limit": 0,
+                "offset": 0,
+                "sort": "fullname",
+                "customfieldname": "",
+                "customfieldvalue": "",
+            }
             payload = await self._call(
                 "core_course_get_enrolled_courses_by_timeline_classification",
-                {
-                    "classification": classification,
-                    "limit": 0,
-                    "offset": 0,
-                    "sort": "fullname",
-                    "customfieldname": "",
-                    "customfieldvalue": "",
-                },
+                arguments,
             )
-            return _extract_list(payload, "courses")
+            courses = _extract_list(payload, "courses")
+            if include_archived:
+                hidden_payload = await self._call(
+                    "core_course_get_enrolled_courses_by_timeline_classification",
+                    {**arguments, "classification": "hidden"},
+                )
+                courses = _merge_course_lists(
+                    courses,
+                    _extract_list(hidden_payload, "courses"),
+                )
+            return courses
         except CampusCapabilityUnavailable:
             pass
         info = await self._info()
@@ -1107,18 +1133,26 @@ class HttpSessionMoodleGateway(CampusGateway):
         }
 
     async def list_courses(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        arguments = {
+            "classification": "all" if include_archived else "inprogress",
+            "limit": 0,
+            "offset": 0,
+            "sort": "fullname",
+            "customfieldname": "",
+            "customfieldvalue": "",
+        }
         payload = await self._ajax(
             "core_course_get_enrolled_courses_by_timeline_classification",
-            {
-                "classification": "all" if include_archived else "inprogress",
-                "limit": 0,
-                "offset": 0,
-                "sort": "fullname",
-                "customfieldname": "",
-                "customfieldvalue": "",
-            },
+            arguments,
         )
-        return _extract_list(payload, "courses")
+        courses = _extract_list(payload, "courses")
+        if include_archived:
+            hidden_payload = await self._ajax(
+                "core_course_get_enrolled_courses_by_timeline_classification",
+                {**arguments, "classification": "hidden"},
+            )
+            courses = _merge_course_lists(courses, _extract_list(hidden_payload, "courses"))
+        return courses
 
     async def action_events(self, start: int, end: int, limit: int) -> list[dict[str, Any]]:
         _validate_limit(limit)

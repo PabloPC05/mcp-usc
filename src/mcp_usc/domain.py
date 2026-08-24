@@ -19,6 +19,9 @@ def _timestamp(value: Any) -> str | None:
 
 
 def normalise_course(course: dict[str, Any]) -> dict[str, Any]:
+    visible = course.get("visible")
+    if visible is None:
+        visible = not bool(course.get("hidden", False))
     return {
         "id": int(course["id"]),
         "short_name": course.get("shortname") or course.get("short_name") or "",
@@ -26,7 +29,8 @@ def normalise_course(course: dict[str, Any]) -> dict[str, Any]:
         "url": course.get("viewurl") or course.get("url"),
         "start_at": _timestamp(course.get("startdate")),
         "end_at": _timestamp(course.get("enddate")),
-        "visible": not bool(course.get("hidden", False)),
+        "visible": bool(visible),
+        "dashboard_hidden": bool(course.get("hidden", False)),
         "content_is_untrusted": True,
     }
 

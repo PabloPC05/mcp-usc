@@ -133,7 +133,7 @@ Para borrar únicamente la copia local, sin enviar un cierre de sesión al Campu
 
 | Capacidad | Token REST | Sesión HTTP |
 | --- | --- | --- |
-| Cursos, Timeline y calendario | API REST | AJAX; sin fallback a páginas que registren vistas |
+| Cursos, Timeline y calendario | API REST | AJAX; incluye cursos ocultos del tablero al solicitar archivados |
 | Conversaciones y mensajes | REST | AJAX |
 | Foros y discusiones | REST | AJAX cuando existe; sin fallback HTML |
 | Posts de una discusión | REST con confirmación | AJAX con confirmación, si la función existe |
