@@ -11,7 +11,7 @@ warnings.filterwarnings(
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 
-from .exam_catalog import OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
+from .exam_catalog import DEGREE_EXAM_PROFILES, OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
 from .service import UscService  # noqa: E402
 
 INSTRUCTIONS = (
@@ -688,6 +688,9 @@ async def list_exam_sources() -> dict:
     sources = list(_service().settings.exam_sources)
     return {
         "official_structured_sources": list(OFFICIAL_EXAM_CALENDAR_URLS),
+        "official_study_plan_sources": [
+            profile.study_plan_url for profile in DEGREE_EXAM_PROFILES.values()
+        ],
         "generic_search_sources": sources,
         "generic_search_configured": bool(sources),
         "sources": sources,
@@ -705,21 +708,35 @@ async def search_exam_dates(
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def list_official_exam_subjects() -> dict:
-    """Lista códigos, nombres, planes y centros admitidos por el calendario estructurado."""
-    return _service().list_official_exam_subjects()
+async def list_official_exam_degrees() -> dict:
+    """Lista las ediciones y crosswalks institucionales admitidos para resolver exámenes."""
+    return _service().list_official_exam_degrees()
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def get_official_exam_dates(subject_codes: list[str], academic_year: str) -> dict:
+async def list_official_exam_subjects(
+    academic_year: str | None = None, degree_keys: list[str] | None = None
+) -> dict:
+    """Descubre códigos y fichas desde los planes oficiales del curso académico exacto."""
+    return await _service().list_official_exam_subjects(academic_year, degree_keys)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_official_exam_dates(
+    subject_codes: list[str],
+    academic_year: str,
+    degree_keys: list[str] | None = None,
+) -> dict:
     """Obtiene convocatorias USC por código y curso exactos, distinguiendo planes homónimos."""
-    return await _service().get_official_exam_dates(subject_codes, academic_year)
+    return await _service().get_official_exam_dates(subject_codes, academic_year, degree_keys)
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def get_my_official_exam_schedule(academic_year: str) -> dict:
+async def get_my_official_exam_schedule(
+    academic_year: str, degree_keys: list[str] | None = None
+) -> dict:
     """Cruza los códigos de mis cursos Moodle con calendarios oficiales USC del año indicado."""
-    return await _service().get_my_official_exam_schedule(academic_year)
+    return await _service().get_my_official_exam_schedule(academic_year, degree_keys)
 
 
 @mcp.tool(annotations=READ_ONLY)

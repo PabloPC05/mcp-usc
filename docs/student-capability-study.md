@@ -8,8 +8,8 @@ académica propia con mínimo privilegio: consultar cursos, agenda, materiales, 
 calificaciones y progreso; y realizar únicamente cambios que el estudiante podría hacer en su
 propia cuenta y contexto.
 
-La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.5 expone
-80 herramientas (42 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
+La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.6 expone
+81 herramientas (43 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
 inspección potencialmente *stateful* confirmada), añade lecturas de alto nivel y un catálogo de 301
 funciones externas candidatas: 192 lecturas y 109 acciones. Ese catálogo es una lista blanca de
 estudio, no una promesa de disponibilidad ni una autorización para ejecutar todas sus acciones.
@@ -296,6 +296,12 @@ El MCP no acepta políticas o consentimientos, no presenta ni resuelve solicitud
 tramita matrículas oficiales, renuncias o convocatorias, no interpreta un informe de similitud como
 plagio y no decide autoría, fraude, nota o sanción. Las fechas de examen de Moodle y las publicadas
 por centros se conservan como fuentes distintas, con su URL y curso académico.
+
+Desde la versión 0.6, los códigos, títulos y fichas de examen se descubren por HTTP desde los planes
+oficiales de las dos ediciones del doble grado. El único crosswalk curado relaciona cada edición con
+su clase institucional de calendario, ya que la web pública no expone una clave externa directa.
+Los códigos presentes en varias ediciones solo se unifican cuando sus convocatorias completas son
+idénticas; cualquier divergencia se devuelve como ambigua con todas sus evidencias.
 
 ### Servicios de terceros
 

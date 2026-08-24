@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from mcp_usc.exam_catalog import (
-    EXAM_SUBJECT_PROFILES,
+    DEGREE_EXAM_PROFILES,
     extract_academic_year,
     extract_subject_code,
     normalise_academic_year,
@@ -11,11 +11,14 @@ from mcp_usc.exam_catalog import (
 )
 
 
-def test_new_numerical_calculus_profile_is_bound_to_new_plan() -> None:
-    profile = EXAM_SUBJECT_PROFILES["G1012106"]
+def test_degree_crosswalks_distinguish_current_and_second_edition() -> None:
+    current = DEGREE_EXAM_PROFILES["double_degree_current"]
+    second = DEGREE_EXAM_PROFILES["double_degree_second_edition"]
 
-    assert profile.name == "Cálculo numérico nunha variable"
-    assert profile.plan_id == 19955
+    assert current.study_plan_catalog_id == 20872
+    assert current.calendar_plan_id == 19955
+    assert second.study_plan_catalog_id == 18399
+    assert second.calendar_plan_id == 17573
 
 
 def test_course_metadata_extractors_accept_moodle_labels() -> None:

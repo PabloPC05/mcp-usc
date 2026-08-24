@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup, Tag
 
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.5 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = "mcp-usc/0.6 (+https://github.com/PabloPC05/mcp-usc)"
 _ACADEMIC_YEAR = re.compile(r"^20(?P<start>\d{2})/20(?P<end>\d{2})$")
 _PLAN_CLASS = re.compile(r"^is-type-(?P<plan_id>\d+)$")
 _SUBJECT_CODE = re.compile(r"^G\d{7}$")

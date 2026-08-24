@@ -84,7 +84,11 @@ from .contextual_actions import submit_choice_response as moodle_submit_choice_r
 from .domain import MADRID, normalise_announcement, normalise_course, normalise_event
 from .exam_catalog import extract_academic_year, extract_subject_code, normalise_academic_year
 from .local_files import inspect_upload_files
-from .official_exams import fetch_official_exam_dates, list_official_exam_subjects
+from .official_exams import (
+    discover_official_exam_subjects,
+    fetch_official_exam_dates,
+    list_official_exam_degrees,
+)
 from .public_web import search_exam_sources
 from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
@@ -1110,27 +1114,49 @@ class UscService:
             timeout=self.settings.request_timeout_seconds,
         )
 
-    def list_official_exam_subjects(self) -> dict[str, Any]:
-        subjects = list_official_exam_subjects()
+    def list_official_exam_degrees(self) -> dict[str, Any]:
+        degrees = list_official_exam_degrees()
         return {
-            "subjects": subjects,
-            "count": len(subjects),
+            "degrees": degrees,
+            "count": len(degrees),
             "note": (
-                "Catálogo cerrado de códigos y planes verificados para el doble grado. "
-                "El buscador genérico USC_EXAM_SOURCES sigue siendo independiente."
+                "Crosswalk institucional cerrado de las dos ediciones del doble grado. "
+                "Las asignaturas se descubren dinámicamente para cada curso académico."
             ),
         }
 
+    async def list_official_exam_subjects(
+        self, academic_year: str | None, degree_keys: list[str] | None
+    ) -> dict[str, Any]:
+        if academic_year is None:
+            return {
+                "status": "academic_year_required",
+                "subjects": [],
+                "degrees": list_official_exam_degrees(),
+                "note": "Indica un curso académico exacto con formato 2025/2026.",
+            }
+        return await discover_official_exam_subjects(
+            academic_year,
+            degree_keys,
+            timeout=self.settings.request_timeout_seconds,
+        )
+
     async def get_official_exam_dates(
-        self, subject_codes: list[str], academic_year: str
+        self,
+        subject_codes: list[str],
+        academic_year: str,
+        degree_keys: list[str] | None = None,
     ) -> dict[str, Any]:
         return await fetch_official_exam_dates(
             subject_codes,
             academic_year,
+            degree_keys,
             timeout=self.settings.request_timeout_seconds,
         )
 
-    async def get_my_official_exam_schedule(self, academic_year: str) -> dict[str, Any]:
+    async def get_my_official_exam_schedule(
+        self, academic_year: str, degree_keys: list[str] | None = None
+    ) -> dict[str, Any]:
         academic_year = normalise_academic_year(academic_year)
         courses = [
             normalise_course(course)
@@ -1167,7 +1193,7 @@ class UscService:
                     "visibles u ocultos del tablero. No se consultó ninguna fuente pública."
                 ),
             }
-        result = await self.get_official_exam_dates(seen_codes, academic_year)
+        result = await self.get_official_exam_dates(seen_codes, academic_year, degree_keys)
         result["matched_moodle_courses"] = selected
         return result
 

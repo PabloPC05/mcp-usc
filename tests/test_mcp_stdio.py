@@ -52,6 +52,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "list_courses",
         "list_discussion_posts",
         "list_exam_sources",
+        "list_official_exam_degrees",
         "list_official_exam_subjects",
         "list_forum_discussions",
         "list_forums",

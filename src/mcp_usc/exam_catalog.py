@@ -19,116 +19,48 @@ _EMBEDDED_ACADEMIC_YEAR = re.compile(
 )
 
 
+OFFICIAL_EXAM_CALENDAR_URLS = (ETSE_EXAM_CALENDAR_URL, MATHEMATICS_EXAM_CALENDAR_URL)
+
+
 @dataclass(frozen=True, slots=True)
-class ExamSubjectProfile:
-    code: str
+class DegreeExamProfile:
+    key: str
     name: str
-    plan_id: int
-    center: str
-    calendar_url: str
-    subject_url: str | None = None
+    study_plan_url: str
+    study_plan_catalog_id: int
+    calendar_plan_id: int
+    calendar_urls: tuple[str, ...] = OFFICIAL_EXAM_CALENDAR_URLS
+    crosswalk_method: str = "curated_and_live_exact_subject_match_verified"
 
     def public_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-# Exact, public mappings for the subjects identified in the user's double-degree courses.
-# A homonymous title is never enough to select a plan: every lookup starts from the G code.
-_PROFILES = (
-    ExamSubjectProfile(
-        "G4012330",
-        "Ciberseguridade",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
+# This crosswalk is institutional metadata, not a list of the user's subjects. USC does not
+# publish a direct foreign key between study-plan IDs and calendar is-type IDs, so both mappings
+# are kept explicit and validated against exact subject titles at runtime.
+_DOUBLE_DEGREE_ROOT = (
+    "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
+    "dobre-grao-enxenaria-informatica-matematicas"
+)
+_DEGREES = (
+    DegreeExamProfile(
+        key="double_degree_current",
+        name="Dobre Grao en Enxeñaría Informática e en Matemáticas",
+        study_plan_url=f"{_DOUBLE_DEGREE_ROOT}-0",
+        study_plan_catalog_id=20872,
+        calendar_plan_id=19955,
     ),
-    ExamSubjectProfile(
-        "G4012222",
-        "Algoritmos e Estruturas de Datos",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
-    ),
-    ExamSubjectProfile(
-        "G4012221",
-        "Bases de Datos I",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
-    ),
-    ExamSubjectProfile(
-        "G1012106",
-        "Cálculo numérico nunha variable",
-        19955,
-        "Facultade de Matemáticas",
-        MATHEMATICS_EXAM_CALENDAR_URL,
-        (
-            "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
-            "dobre-grao-enxenaria-informatica-matematicas-0/20252026/"
-            "calculo-numerico-variable-20874-19957-11-109205"
-        ),
-    ),
-    ExamSubjectProfile(
-        "G1011321",
-        "Cálculo Vectorial e Integración de Lebesgue",
-        17573,
-        "Facultade de Matemáticas",
-        MATHEMATICS_EXAM_CALENDAR_URL,
-        (
-            "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
-            "dobre-grao-enxenaria-informatica-matematicas-2a-edicion/20252026/"
-            "calculo-vectorial-integracion-lebesgue-18403-17568-2-75978"
-        ),
-    ),
-    ExamSubjectProfile(
-        "G4012327",
-        "Compiladores e Intérpretes",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
-    ),
-    ExamSubjectProfile(
-        "G4012454",
-        "Modelos e Técnicas de Optimización",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
-    ),
-    ExamSubjectProfile(
-        "G1011227",
-        "Programación Linear e Enteira",
-        17573,
-        "Facultade de Matemáticas",
-        MATHEMATICS_EXAM_CALENDAR_URL,
-        (
-            "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
-            "dobre-grao-enxenaria-informatica-matematicas-2a-edicion/20252026/"
-            "programacion-linear-enteira-18403-17568-2-75975"
-        ),
-    ),
-    ExamSubjectProfile(
-        "G4012321",
-        "Teoría de Autómatas e Linguaxes Formais",
-        17573,
-        "Escola Técnica Superior de Enxeñaría",
-        ETSE_EXAM_CALENDAR_URL,
-    ),
-    ExamSubjectProfile(
-        "G1011330",
-        "Topoloxía Xeral",
-        17573,
-        "Facultade de Matemáticas",
-        MATHEMATICS_EXAM_CALENDAR_URL,
-        (
-            "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
-            "dobre-grao-enxenaria-informatica-matematicas-2a-edicion/20252026/"
-            "topoloxia-xeral-18403-17568-2-75987"
-        ),
+    DegreeExamProfile(
+        key="double_degree_second_edition",
+        name="Dobre Grao en Enxeñaría Informática e en Matemáticas (2ª edición)",
+        study_plan_url=f"{_DOUBLE_DEGREE_ROOT}-2a-edicion",
+        study_plan_catalog_id=18399,
+        calendar_plan_id=17573,
     ),
 )
 
-EXAM_SUBJECT_PROFILES = {profile.code: profile for profile in _PROFILES}
-OFFICIAL_EXAM_CALENDAR_URLS = (ETSE_EXAM_CALENDAR_URL, MATHEMATICS_EXAM_CALENDAR_URL)
+DEGREE_EXAM_PROFILES = {profile.key: profile for profile in _DEGREES}
 
 
 def normalise_subject_code(value: str) -> str:
