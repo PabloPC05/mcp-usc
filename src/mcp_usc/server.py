@@ -11,6 +11,7 @@ warnings.filterwarnings(
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 
+from .exam_catalog import OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
 from .service import UscService  # noqa: E402
 
 INSTRUCTIONS = (
@@ -683,9 +684,12 @@ async def remove_submission(
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_exam_sources() -> dict:
-    """Muestra las páginas/PDF oficiales configurados para buscar fechas de exámenes."""
+    """Muestra calendarios oficiales integrados y páginas/PDF configuradas por el usuario."""
     sources = list(_service().settings.exam_sources)
     return {
+        "official_structured_sources": list(OFFICIAL_EXAM_CALENDAR_URLS),
+        "generic_search_sources": sources,
+        "generic_search_configured": bool(sources),
         "sources": sources,
         "configured": bool(sources),
         "configuration": "USC_EXAM_SOURCES (URLs HTTPS separadas por punto y coma)",
@@ -698,6 +702,24 @@ async def search_exam_dates(
 ) -> dict:
     """Busca evidencias de fechas en páginas/PDF oficiales USC y conserva URL/página."""
     return await _service().search_exams(query, source_urls, max_documents)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_official_exam_subjects() -> dict:
+    """Lista códigos, nombres, planes y centros admitidos por el calendario estructurado."""
+    return _service().list_official_exam_subjects()
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_official_exam_dates(subject_codes: list[str], academic_year: str) -> dict:
+    """Obtiene convocatorias USC por código y curso exactos, distinguiendo planes homónimos."""
+    return await _service().get_official_exam_dates(subject_codes, academic_year)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_my_official_exam_schedule(academic_year: str) -> dict:
+    """Cruza los códigos de mis cursos Moodle con calendarios oficiales USC del año indicado."""
+    return await _service().get_my_official_exam_schedule(academic_year)
 
 
 @mcp.tool(annotations=READ_ONLY)

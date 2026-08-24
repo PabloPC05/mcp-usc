@@ -8,8 +8,8 @@ académica propia con mínimo privilegio: consultar cursos, agenda, materiales, 
 calificaciones y progreso; y realizar únicamente cambios que el estudiante podría hacer en su
 propia cuenta y contexto.
 
-La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.4 expone
-77 herramientas (39 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
+La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.5 expone
+80 herramientas (42 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
 inspección potencialmente *stateful* confirmada), añade lecturas de alto nivel y un catálogo de 301
 funciones externas candidatas: 192 lecturas y 109 acciones. Ese catálogo es una lista blanca de
 estudio, no una promesa de disponibilidad ni una autorización para ejecutar todas sus acciones.

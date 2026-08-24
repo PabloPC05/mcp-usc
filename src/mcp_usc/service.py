@@ -82,7 +82,9 @@ from .contextual_actions import (
 from .contextual_actions import reply_forum_post as moodle_reply_forum_post
 from .contextual_actions import submit_choice_response as moodle_submit_choice_response
 from .domain import MADRID, normalise_announcement, normalise_course, normalise_event
+from .exam_catalog import extract_academic_year, extract_subject_code, normalise_academic_year
 from .local_files import inspect_upload_files
+from .official_exams import fetch_official_exam_dates, list_official_exam_subjects
 from .public_web import search_exam_sources
 from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
@@ -1107,6 +1109,67 @@ class UscService:
             max_documents=max_documents,
             timeout=self.settings.request_timeout_seconds,
         )
+
+    def list_official_exam_subjects(self) -> dict[str, Any]:
+        subjects = list_official_exam_subjects()
+        return {
+            "subjects": subjects,
+            "count": len(subjects),
+            "note": (
+                "Catálogo cerrado de códigos y planes verificados para el doble grado. "
+                "El buscador genérico USC_EXAM_SOURCES sigue siendo independiente."
+            ),
+        }
+
+    async def get_official_exam_dates(
+        self, subject_codes: list[str], academic_year: str
+    ) -> dict[str, Any]:
+        return await fetch_official_exam_dates(
+            subject_codes,
+            academic_year,
+            timeout=self.settings.request_timeout_seconds,
+        )
+
+    async def get_my_official_exam_schedule(self, academic_year: str) -> dict[str, Any]:
+        academic_year = normalise_academic_year(academic_year)
+        courses = [
+            normalise_course(course)
+            for course in await self._campus().list_courses(include_archived=True)
+        ]
+        selected: list[dict[str, Any]] = []
+        seen_codes: list[str] = []
+        for course in courses:
+            code = extract_subject_code(course.get("short_name"), course.get("full_name"))
+            course_year = extract_academic_year(course.get("short_name"), course.get("full_name"))
+            if code is None or (course_year is not None and course_year != academic_year):
+                continue
+            selected.append(
+                {
+                    "course_id": course["id"],
+                    "subject_code": code,
+                    "course_name": course["full_name"],
+                    "course_academic_year": course_year,
+                    "dashboard_hidden": course["dashboard_hidden"],
+                    "content_is_untrusted": True,
+                }
+            )
+            if code not in seen_codes:
+                seen_codes.append(code)
+
+        if not seen_codes:
+            return {
+                "academic_year": academic_year,
+                "matched_moodle_courses": [],
+                "subjects": [],
+                "sources_checked": [],
+                "note": (
+                    "No se encontraron códigos G de ese curso académico entre los cursos "
+                    "visibles u ocultos del tablero. No se consultó ninguna fuente pública."
+                ),
+            }
+        result = await self.get_official_exam_dates(seen_codes, academic_year)
+        result["matched_moodle_courses"] = selected
+        return result
 
     async def search_message_contacts(self, query: str, limit: int) -> list[dict[str, Any]]:
         query = query.strip()

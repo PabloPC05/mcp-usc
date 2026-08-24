@@ -46,7 +46,7 @@ class PublicUscClient:
     async def fetch(self, url: str) -> FetchedDocument:
         current = validate_usc_url(url)
         headers = {
-            "User-Agent": "mcp-usc/0.4 (+https://github.com/PabloPC05/mcp-usc)",
+            "User-Agent": "mcp-usc/0.5 (+https://github.com/PabloPC05/mcp-usc)",
             "Accept": "text/html,application/pdf;q=0.9,*/*;q=0.2",
         }
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
@@ -188,6 +188,7 @@ async def search_exam_sources(
         try:
             document = await client.fetch(requested)
             if document.content_type == "application/pdf" or document.url.lower().endswith(".pdf"):
+                document_result_count = 0
                 for page_number, lines in _pdf_pages(document.content):
                     page_terms = terms
                     if terms and any(_matches(line, terms, False) for line in lines):
@@ -195,7 +196,7 @@ async def search_exam_sources(
                     snippets = _snippets(
                         lines,
                         page_terms,
-                        max_snippets=max_snippets_per_document - len(results),
+                        max_snippets=max_snippets_per_document - document_result_count,
                     )
                     for snippet in snippets:
                         results.append(
@@ -206,7 +207,8 @@ async def search_exam_sources(
                                 "content_is_untrusted": True,
                             }
                         )
-                    if len(results) >= max_snippets_per_document * max_documents:
+                        document_result_count += 1
+                    if document_result_count >= max_snippets_per_document:
                         break
             else:
                 lines, links = _html_lines(document.content)

@@ -4,7 +4,7 @@ Servidor MCP local y HTTP-first para el Campus Virtual Moodle de la Universidade
 Compostela. Permite consultar cursos, calendario, mensajes, foros, materiales, tareas y
 cuestionarios, además de buscar fechas de examen en páginas y PDF oficiales de la USC.
 
-La versión 0.4.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
+La versión 0.5.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
 permitidas y 109 acciones identificadas. Solo doce cambios privados de alcance inequívoco se
 pueden ejecutar por la interfaz genérica; publicaciones, actividades evaluables, entregas,
 cuestionarios y eliminaciones usan herramientas contextuales. Toda operación con efecto exige
@@ -182,8 +182,22 @@ antes de crear un borrador o modificar la entrega.
 
 ## Fuentes públicas de exámenes
 
-Cada centro USC publica sus propios calendarios. Configura páginas o PDF canónicos separados por
-punto y coma:
+El MCP integra por HTTP los calendarios dinámicos oficiales de la ETSE y la Facultade de
+Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas tres herramientas:
+
+- `list_official_exam_subjects`: códigos, nombres, centro y plan exacto admitidos;
+- `get_official_exam_dates`: convocatorias estructuradas para códigos y curso académico explícitos;
+- `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
+  incluidos los ocultos del tablero.
+
+El catálogo distingue por código y plan antes de unir el título. En particular, `G1012106` está
+ligada al plan nuevo `19955`; nunca toma las fechas de los planes antiguos con el mismo nombre.
+El curso académico es obligatorio con formato `2025/2026`. Cada resultado conserva URL canónica,
+endpoint consultado, convocatoria, oportunidad, fecha, hora, aulas y grupos. Una ausencia se
+informa como `not_published_or_not_found`, no como «no tienes examen».
+
+Además, cada centro USC puede publicar otras páginas o PDF. Para el buscador genérico
+`search_exam_dates`, configura fuentes adicionales separadas por punto y coma:
 
 ```powershell
 $env:USC_EXAM_SOURCES = "https://www.usc.gal/gl/centro/MI_CENTRO/horarios/cursos;https://assets.usc.gal/ruta/calendario.pdf"
@@ -228,7 +242,7 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.4.0 expone 77 herramientas: 39 lecturas puras, 19 previsualizaciones, 18 operaciones con
+La versión 0.5.0 expone 80 herramientas: 42 lecturas puras, 19 previsualizaciones, 18 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
 [estudio completo de capacidades](docs/student-capability-study.md) explica el inventario, las
 fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
@@ -239,7 +253,7 @@ fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
 | Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements`, `list_calendar_events` | crear o borrar un evento personal | crear o borrar un evento personal |
 | Mensajes y foros | `list_messages`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `search_message_contacts`; `list_discussion_posts` se conserva pero falla cerrado | mensaje, inspección de posts, nueva discusión o respuesta | enviar mensaje, inspeccionar posts, crear discusión o responder |
 | Choice | funciones de lectura del catálogo | enviar o retirar respuesta | enviar o retirar respuesta propia |
-| Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates` | — | — |
+| Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates`, `list_official_exam_subjects`, `get_official_exam_dates`, `get_my_official_exam_schedule` | — | — |
 | Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_inspect_submission_status`, `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `inspect_submission_status`, `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
 | Cuestionarios | `list_quizzes`, `list_quiz_attempts`, revisión final y mejor nota | inspeccionar intento activo, iniciar, guardar o finalizar | inspeccionar intento activo, iniciar, guardar o finalizar |
 
