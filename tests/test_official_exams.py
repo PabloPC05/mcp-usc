@@ -111,6 +111,35 @@ async def test_official_dates_discover_new_plan_instead_of_homonymous_old_plan()
     assert item["candidates"][0]["calendar_plan_id"] == 19955
 
 
+async def test_variant_code_round_trips_from_listing_to_official_query() -> None:
+    subject = StudyPlanSubject(
+        "G1012106A",
+        "Materia variante",
+        "https://www.usc.gal/gl/estudos/variante",
+    )
+    call = ExamCall("1º semestre", "1ª Oportunidade", "20.01.2026 - 10:00", (), ())
+    plans, calendars = _clients(
+        current_subjects=(subject,),
+        second_subjects=(),
+        calendar_subjects=(ExamSubject(19955, subject.name, (call,)),),
+    )
+
+    listing = await discover_official_exam_subjects(
+        "2025/2026",
+        client=plans,  # type: ignore[arg-type]
+    )
+    result = await fetch_official_exam_dates(
+        ["g1012106a"],
+        "2025/2026",
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=calendars,  # type: ignore[arg-type]
+    )
+
+    assert listing["subjects"][0]["subject_code"] == "G1012106A"
+    assert result["subjects"][0]["subject_code"] == "G1012106A"
+    assert result["subjects"][0]["status"] == "matched"
+
+
 async def test_same_code_in_both_plans_is_unified_only_when_calls_are_equal() -> None:
     subject = StudyPlanSubject("G4012222", "Algoritmos e Estruturas de Datos", "https://www.usc.gal/gl/estudos/a")
     second_subject = StudyPlanSubject(subject.code, subject.name, "https://www.usc.gal/gl/estudos/b")
@@ -347,8 +376,15 @@ async def test_my_schedule_uses_hidden_courses_and_filters_exact_year(
         degree_keys: list[str] | None,
         *,
         timeout: float,
+        cache: object,
     ) -> dict[str, Any]:
-        captured.update(codes=codes, year=year, degree_keys=degree_keys, timeout=timeout)
+        captured.update(
+            codes=codes,
+            year=year,
+            degree_keys=degree_keys,
+            timeout=timeout,
+            cache=cache,
+        )
         return {
             "academic_year": year,
             "subjects": [],
@@ -373,4 +409,5 @@ async def test_my_schedule_uses_hidden_courses_and_filters_exact_year(
     assert captured["codes"] == ["G1012106"]
     assert captured["year"] == "2025/2026"
     assert captured["degree_keys"] is None
+    assert captured["cache"] is service._public_http_cache
     assert result["matched_moodle_courses"][0]["dashboard_hidden"] is True

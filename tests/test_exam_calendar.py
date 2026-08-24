@@ -265,3 +265,14 @@ def test_subject_sheet_accepts_only_an_explicit_structured_code() -> None:
       </tbody></table>
     """
     assert parse_subject_sheet_html(html, SUBJECT_URL).code == "G1012106"
+
+
+def test_subject_sheet_preserves_and_normalises_variant_code() -> None:
+    html = """
+      <h1>Materia variante</h1><span data-subject-code="g1012106b"></span>
+      <table><caption>Exames</caption><tbody>
+        <tr><td>28.05.2026 10:00-14:00</td><td>Grupo 1</td><td>Aula 06</td></tr>
+      </tbody></table>
+    """
+
+    assert parse_subject_sheet_html(html, SUBJECT_URL).code == "G1012106B"

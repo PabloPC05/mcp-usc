@@ -15,6 +15,7 @@ from .exam_catalog import (
     normalise_subject_code,
     normalise_subject_title,
 )
+from .public_http_cache import PublicHttpCache, public_cache_summary
 from .study_plans import StudyPlan, StudyPlanError, StudyPlanSubject, UscStudyPlanClient
 
 
@@ -126,10 +127,11 @@ async def discover_official_exam_subjects(
     *,
     timeout: float = 30.0,
     client: UscStudyPlanClient | None = None,
+    cache: PublicHttpCache | None = None,
 ) -> dict[str, Any]:
     year = normalise_academic_year(academic_year)
     degrees = _select_degrees(degree_keys)
-    plan_client = client or UscStudyPlanClient(timeout=timeout)
+    plan_client = client or UscStudyPlanClient(timeout=timeout, cache=cache)
     plans, errors = await _load_study_plans(degrees, year, plan_client)
     indexed = _candidate_index(degrees, plans)
     subjects = [
@@ -155,6 +157,9 @@ async def discover_official_exam_subjects(
         "count": len(subjects),
         "complete": not errors,
         "fetched_at": datetime.now(MADRID).isoformat(),
+        "cache": public_cache_summary(
+            metadata for plan in plans.values() for metadata in plan.cache_metadata
+        ),
         "content_is_untrusted": True,
     }
 
@@ -395,14 +400,15 @@ async def fetch_official_exam_dates(
     timeout: float = 30.0,
     calendar_client: UscExamCalendarClient | None = None,
     study_plan_client: UscStudyPlanClient | None = None,
+    cache: PublicHttpCache | None = None,
 ) -> dict[str, Any]:
     """Resolve exact codes dynamically through official study plans and calendars."""
 
     year = normalise_academic_year(academic_year)
     codes = _validated_codes(subject_codes)
     degrees = _select_degrees(degree_keys)
-    plan_client = study_plan_client or UscStudyPlanClient(timeout=timeout)
-    exams_client = calendar_client or UscExamCalendarClient(timeout=timeout)
+    plan_client = study_plan_client or UscStudyPlanClient(timeout=timeout, cache=cache)
+    exams_client = calendar_client or UscExamCalendarClient(timeout=timeout, cache=cache)
     (plans, plan_errors), (calendars, calendar_errors) = await asyncio.gather(
         _load_study_plans(degrees, year, plan_client),
         _load_calendars(degrees, year, exams_client),
@@ -435,6 +441,11 @@ async def fetch_official_exam_dates(
         ],
         "complete": not incomplete_sources,
         "fetched_at": datetime.now(MADRID).isoformat(),
+        "cache": public_cache_summary(
+            metadata
+            for resource in (*plans.values(), *calendars.values())
+            for metadata in resource.cache_metadata
+        ),
         "note": (
             "Las asignaturas se resuelven por código exacto desde los planes públicos y después "
             "por título normalizado y plan institucional en los calendarios. Convocatoria "

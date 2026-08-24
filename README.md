@@ -4,11 +4,11 @@ Servidor MCP local y HTTP-first para el Campus Virtual Moodle de la Universidade
 Compostela. Permite consultar cursos, calendario, mensajes, foros, materiales, tareas y
 cuestionarios, además de buscar fechas de examen en páginas y PDF oficiales de la USC.
 
-La versión 0.6.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
-permitidas y 109 acciones identificadas. Solo doce cambios privados de alcance inequívoco se
-pueden ejecutar por la interfaz genérica; publicaciones, actividades evaluables, entregas,
-cuestionarios y eliminaciones usan herramientas contextuales. Toda operación con efecto exige
-previsualización, token de un solo uso y aprobación del cliente MCP.
+La versión 0.7.0 descubre por HTTP el catálogo público completo de grados de la USC, localiza códigos
+de materia en sus planes oficiales y añade caché/revalidación segura con detección explícita de
+cambios de esquema. Mantiene las 301 capacidades Moodle estudiadas: 192 lecturas permitidas y 109
+acciones identificadas. Toda operación con efecto exige previsualización, token de un solo uso y
+aprobación del cliente MCP.
 
 ## Principios de diseño
 
@@ -182,8 +182,12 @@ antes de crear un borrador o modificar la entrega.
 
 ## Fuentes públicas de exámenes
 
-El MCP integra por HTTP los calendarios dinámicos oficiales de la ETSE y la Facultade de
-Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas cuatro herramientas:
+El MCP integra por HTTP el catálogo de grados y los calendarios dinámicos oficiales de la ETSE y la
+Facultade de Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas seis
+herramientas:
+
+- `list_usc_degrees`: lista las titulaciones enlazadas por el catálogo oficial actual;
+- `locate_usc_subject_codes`: localiza códigos exactos en los planes oficiales de un curso;
 
 - `list_official_exam_degrees`: ediciones y crosswalks institucionales admitidos;
 - `list_official_exam_subjects`: descubre códigos, nombres y fichas para un curso académico;
@@ -191,10 +195,20 @@ Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas c
 - `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
   incluidos los ocultos del tablero.
 
-La versión 0.6 elimina el catálogo personal de diez códigos: lee dinámicamente los planes públicos
-de las dos ediciones del doble grado. Para 2025/2026 descubre 87 materias por edición y 130 códigos
-únicos. Solo permanece curado el crosswalk institucional entre cada edición y su identificador de
-calendario, porque la USC no publica una clave externa directa entre ambos sistemas.
+La versión 0.7 conserva la resolución específica del doble grado y añade una búsqueda independiente
+en todos los grados actuales. En la comprobación real de 2026/2027 se procesaron las 65 entradas del
+catálogo, incluidas materias repetidas por itinerarios y códigos oficiales con sufijo como
+`G3131324B`. Las repeticiones solo se fusionan si código y título coinciden exactamente, y se
+conservan todas sus fichas. Un título contradictorio, una respuesta parcial o un cambio de HTML se
+devuelve como incidencia; nunca como un falso `not_found`.
+
+El barrido global puede superar un minuto porque consulta todos los planes y la USC exige
+revalidación. Para una consulta rápida, `locate_usc_subject_codes` acepta `area_slugs` o
+`degree_urls`; ambos filtros se verifican contra el catálogo recién obtenido. Localizar una materia
+en cualquier grado no implica que exista todavía un calendario estructurado compatible para su
+centro. Solo permanece curado el crosswalk institucional entre las dos ediciones del doble grado y
+sus identificadores de calendario, porque la USC no publica una clave externa directa entre ambos
+sistemas.
 
 El código se obtiene de la lista oficial y queda ligado a su título y ficha adyacentes. Después se
 busca ese título únicamente dentro del plan de calendario correspondiente. Si un código aparece en
@@ -202,6 +216,16 @@ ambas ediciones, se unifica solo cuando todas las convocatorias coinciden; si di
 `ambiguous`. Por ello `G1012106` se resuelve al plan actual `19955` y nunca toma las fechas del plan
 antiguo homónimo. El curso académico es obligatorio con formato `2025/2026`. Cada resultado conserva
 URL, endpoint, convocatoria, oportunidad, fecha, hora, aulas, grupos y evidencia por plan y centro.
+
+Las respuestas públicas incluyen un resumen `cache` con frescura, aciertos y degradación. La caché
+local es LRU, acotada, se comparte durante la vida del proceso MCP únicamente entre GET públicos
+anónimos, valida el esquema antes de guardar y admite ETag/Last-Modified. Nunca se comparte con el
+Campus autenticado. Puede
+configurarse con `USC_PUBLIC_CACHE_TTL_SECONDS`,
+`USC_PUBLIC_CACHE_STALE_IF_ERROR_SECONDS`, `USC_PUBLIC_CACHE_MAX_ENTRIES` y
+`USC_PUBLIC_CACHE_MAX_BYTES`. Actualmente las páginas dinámicas de la USC responden
+`no-cache, must-revalidate` y no publican validadores; el conector respeta esa política, muestra TTL
+cero y vuelve a consultar la red en lugar de servir datos potencialmente obsoletos.
 
 Además, cada centro USC puede publicar otras páginas o PDF. Para el buscador genérico
 `search_exam_dates`, configura fuentes adicionales separadas por punto y coma:
@@ -249,7 +273,7 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.6.0 expone 81 herramientas: 43 lecturas puras, 19 previsualizaciones, 18 operaciones con
+La versión 0.7.0 expone 83 herramientas: 45 lecturas puras, 19 previsualizaciones, 18 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
 [estudio completo de capacidades](docs/student-capability-study.md) explica el inventario, las
 fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
@@ -260,7 +284,7 @@ fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
 | Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements`, `list_calendar_events` | crear o borrar un evento personal | crear o borrar un evento personal |
 | Mensajes y foros | `list_messages`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `search_message_contacts`; `list_discussion_posts` se conserva pero falla cerrado | mensaje, inspección de posts, nueva discusión o respuesta | enviar mensaje, inspeccionar posts, crear discusión o responder |
 | Choice | funciones de lectura del catálogo | enviar o retirar respuesta | enviar o retirar respuesta propia |
-| Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates`, `list_official_exam_degrees`, `list_official_exam_subjects`, `get_official_exam_dates`, `get_my_official_exam_schedule` | — | — |
+| Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates`, `list_usc_degrees`, `locate_usc_subject_codes`, `list_official_exam_degrees`, `list_official_exam_subjects`, `get_official_exam_dates`, `get_my_official_exam_schedule` | — | — |
 | Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_inspect_submission_status`, `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `inspect_submission_status`, `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
 | Cuestionarios | `list_quizzes`, `list_quiz_attempts`, revisión final y mejor nota | inspeccionar intento activo, iniciar, guardar o finalizar | inspeccionar intento activo, iniciar, guardar o finalizar |
 
@@ -384,6 +408,25 @@ La suite sustituye HTTP, keyring, formularios, subidas y descargas por dobles de
 tokens, cookies ni datos reales y no ejecuta ninguna escritura contra la USC. El acceso real se
 valida solo de forma manual y local.
 
+También hay una auditoría opt-in separada para la demo oficial de Moodle, que se reinicia cada hora.
+El host está fijado a `school.moodledemo.net`; el script no modifica la allowlist USC, no guarda ni
+imprime el token y bloquea mensajes, chats y publicaciones de foro. Token y contraseña se aceptan
+solo mediante variables de entorno, nunca como argumentos visibles del proceso:
+
+```powershell
+$env:MOODLE_DEMO_USERNAME = "usuario público actual de la demo"
+$env:MOODLE_DEMO_PASSWORD = "contraseña pública actual de la demo"
+uv run python scripts/moodle_demo_audit.py --confirm-demo
+```
+
+Por defecto solo ejecuta lecturas y marca las escrituras como `skip`. La opción adicional
+`--allow-reversible-write` crea un único evento personal desechable, comprueba por ID, nombre y
+propietario que es exactamente el recién creado, lo elimina y vuelve a leerlo para demostrar que no
+queda estado externo; no habilita ninguna comunicación. En la validación de v0.7 sobre Moodle 5.2,
+la pasada de solo lectura produjo 66 comprobaciones correctas y cero fallos; las omisiones
+justificadas pueden variar porque otras personas usan la demo simultáneamente y el sitio se
+reinicia cada hora.
+
 ## Fuentes oficiales
 
 El contrato se contrastó con documentación y código oficial:
@@ -406,6 +449,8 @@ El contrato se contrastó con documentación y código oficial:
   y [repositorios](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/repository/filepicker.php).
 - [`moodlehq/moodleapp`](https://github.com/moodlehq/moodleapp) (Apache-2.0), referencia oficial de
   uso de servicios, contenidos y recursos desde un cliente.
+- [Demo oficial de Moodle](https://moodle.org/demo), entorno reseteable usado por la auditoría
+  opt-in; otras personas pueden usarlo simultáneamente y sus credenciales públicas cambian.
 
 ## Trabajo previo revisado
 
@@ -444,3 +489,6 @@ se copió código.
   servidor no consulta.
 - Una fecha de Moodle puede ser evaluación continua y una fecha pública, examen oficial. Se
   conservan como fuentes distintas.
+- El localizador global conoce titulaciones y materias, pero las fechas oficiales estructuradas
+  siguen limitadas a los centros y crosswalks declarados. Los demás calendarios se consultan con
+  `search_exam_dates` y fuentes configuradas, sin atribuir fechas por similitud de nombre.

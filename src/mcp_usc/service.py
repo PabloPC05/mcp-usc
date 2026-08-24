@@ -81,6 +81,11 @@ from .contextual_actions import (
 )
 from .contextual_actions import reply_forum_post as moodle_reply_forum_post
 from .contextual_actions import submit_choice_response as moodle_submit_choice_response
+from .degree_catalog import (
+    USC_DEGREE_CATALOG_URL,
+    UscDegreeCatalogClient,
+    locate_subject_codes,
+)
 from .domain import MADRID, normalise_announcement, normalise_course, normalise_event
 from .exam_catalog import extract_academic_year, extract_subject_code, normalise_academic_year
 from .local_files import inspect_upload_files
@@ -89,6 +94,7 @@ from .official_exams import (
     fetch_official_exam_dates,
     list_official_exam_degrees,
 )
+from .public_http_cache import PublicHttpCache, public_cache_summary
 from .public_web import search_exam_sources
 from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
@@ -399,8 +405,19 @@ async def _session_form_mutation(action: str, operation: Any) -> dict[str, Any]:
 
 
 class UscService:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        public_http_cache: PublicHttpCache | None = None,
+    ) -> None:
         self.settings = settings or Settings.from_env()
+        self._public_http_cache = public_http_cache or PublicHttpCache(
+            ttl_seconds=self.settings.public_cache_ttl_seconds,
+            stale_if_error_seconds=self.settings.public_cache_stale_if_error_seconds,
+            max_entries=self.settings.public_cache_max_entries,
+            max_total_bytes=self.settings.public_cache_max_total_bytes,
+        )
 
     def _campus(self):
         return create_campus_gateway(self.settings)
@@ -1114,6 +1131,42 @@ class UscService:
             timeout=self.settings.request_timeout_seconds,
         )
 
+    async def list_usc_degrees(self) -> dict[str, Any]:
+        """List current degrees from the anonymous official USC catalogue."""
+
+        catalog = await UscDegreeCatalogClient(
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        ).fetch_catalog(USC_DEGREE_CATALOG_URL)
+        return {
+            "source_url": catalog.source_url,
+            "degrees": [degree.public_dict() for degree in catalog.degrees],
+            "count": len(catalog.degrees),
+            "cache": public_cache_summary(catalog.cache_metadata),
+            "content_is_untrusted": True,
+        }
+
+    async def locate_usc_subject_codes(
+        self,
+        subject_codes: list[str],
+        academic_year: str,
+        area_slugs: list[str] | None = None,
+        degree_urls: list[str] | None = None,
+        concurrency: int = 8,
+    ) -> dict[str, Any]:
+        """Locate exact G codes across every current degree plan advertised by USC."""
+
+        result = await locate_subject_codes(
+            subject_codes,
+            academic_year,
+            area_slugs=area_slugs,
+            degree_urls=degree_urls,
+            concurrency=concurrency,
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        )
+        return result.public_dict()
+
     def list_official_exam_degrees(self) -> dict[str, Any]:
         degrees = list_official_exam_degrees()
         return {
@@ -1139,6 +1192,7 @@ class UscService:
             academic_year,
             degree_keys,
             timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
         )
 
     async def get_official_exam_dates(
@@ -1152,6 +1206,7 @@ class UscService:
             academic_year,
             degree_keys,
             timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
         )
 
     async def get_my_official_exam_schedule(

@@ -24,6 +24,10 @@ class Settings:
     request_timeout_seconds: float = 30.0
     upload_root: Path | None = None
     max_upload_bytes: int = 50 * 1024 * 1024
+    public_cache_ttl_seconds: float = 300.0
+    public_cache_stale_if_error_seconds: float = 3_600.0
+    public_cache_max_entries: int = 128
+    public_cache_max_total_bytes: int = 64_000_000
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -41,6 +45,30 @@ class Settings:
         request_timeout_seconds = float(os.getenv("USC_HTTP_TIMEOUT", "30"))
         if not math.isfinite(request_timeout_seconds) or not 1 <= request_timeout_seconds <= 120:
             raise ValueError("USC_HTTP_TIMEOUT debe estar entre 1 y 120 segundos")
+        public_cache_ttl_seconds = float(os.getenv("USC_PUBLIC_CACHE_TTL_SECONDS", "300"))
+        if (
+            not math.isfinite(public_cache_ttl_seconds)
+            or not 0 <= public_cache_ttl_seconds <= 86_400
+        ):
+            raise ValueError("USC_PUBLIC_CACHE_TTL_SECONDS debe estar entre 0 y 86400")
+        public_cache_stale_if_error_seconds = float(
+            os.getenv("USC_PUBLIC_CACHE_STALE_IF_ERROR_SECONDS", "3600")
+        )
+        if (
+            not math.isfinite(public_cache_stale_if_error_seconds)
+            or not 0 <= public_cache_stale_if_error_seconds <= 604_800
+        ):
+            raise ValueError(
+                "USC_PUBLIC_CACHE_STALE_IF_ERROR_SECONDS debe estar entre 0 y 604800"
+            )
+        public_cache_max_entries = int(os.getenv("USC_PUBLIC_CACHE_MAX_ENTRIES", "128"))
+        if not 1 <= public_cache_max_entries <= 4_096:
+            raise ValueError("USC_PUBLIC_CACHE_MAX_ENTRIES debe estar entre 1 y 4096")
+        public_cache_max_total_bytes = int(
+            os.getenv("USC_PUBLIC_CACHE_MAX_BYTES", "64000000")
+        )
+        if not 1 <= public_cache_max_total_bytes <= 512_000_000:
+            raise ValueError("USC_PUBLIC_CACHE_MAX_BYTES debe estar entre 1 y 512000000")
 
         return cls(
             moodle_url=os.getenv("USC_MOODLE_URL", "https://cv.usc.es").rstrip("/"),
@@ -53,4 +81,8 @@ class Settings:
             request_timeout_seconds=request_timeout_seconds,
             upload_root=upload_root,
             max_upload_bytes=max_upload_bytes,
+            public_cache_ttl_seconds=public_cache_ttl_seconds,
+            public_cache_stale_if_error_seconds=public_cache_stale_if_error_seconds,
+            public_cache_max_entries=public_cache_max_entries,
+            public_cache_max_total_bytes=public_cache_max_total_bytes,
         )

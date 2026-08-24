@@ -10,11 +10,15 @@ import pytest
 
 from mcp_usc.security import UnsafeUrlError
 from mcp_usc.study_plans import (
+    StudyPlanAcademicYearUnavailable,
+    StudyPlanHttpError,
     StudyPlanParseError,
+    StudyPlanSchemaChangedError,
     UscStudyPlanClient,
     discover_study_plan_endpoint,
     extract_study_plan_insert,
     parse_study_plan_html,
+    parse_study_plan_sheet_html,
 )
 
 CANONICAL = "https://www.usc.gal/gl/estudos/graos/ciencias/grao-matematicas"
@@ -74,6 +78,37 @@ def test_discovers_a_year_link_rendered_inside_template() -> None:
     assert discover_study_plan_endpoint(html, CANONICAL, "2025/2026") == ENDPOINT
 
 
+def test_by_course_with_unrecognised_year_label_is_schema_change() -> None:
+    html = f'<h1>Matemáticas</h1><a href="{ENDPOINT}">Curso académico: 2026/2027</a>'
+
+    with pytest.raises(StudyPlanParseError, match="etiqueta.*no reconocida"):
+        discover_study_plan_endpoint(html, CANONICAL, "2026/2027")
+
+
+def test_unavailable_year_requires_exhaustive_recognised_year_labels() -> None:
+    html = (
+        f'<a href="{ENDPOINT}">Curso 2025/2026</a>'
+        '<a href="/gl/course/77/study-plan-by-course/20873">'
+        "Curso académico: 2026/2027</a>"
+    )
+
+    with pytest.raises(StudyPlanParseError, match="etiqueta.*no reconocida"):
+        discover_study_plan_endpoint(html, CANONICAL, "2027/2028")
+
+
+def test_unavailable_year_exception_rejects_absence_without_positive_evidence() -> None:
+    with pytest.raises(ValueError, match="evidencia"):
+        StudyPlanAcademicYearUnavailable("2025/2026", ())
+
+
+def test_missing_academic_year_is_not_misclassified_as_schema_change() -> None:
+    html = '<a href="/gl/course/77/study-plan-by-course/20872">Curso 2026/2027</a>'
+
+    with pytest.raises(StudyPlanAcademicYearUnavailable) as captured:
+        discover_study_plan_endpoint(html, CANONICAL, "2025/2026")
+    assert captured.value.academic_year == "2025/2026"
+
+
 def test_plan_parser_keeps_code_bound_to_adjacent_title_link() -> None:
     subjects = parse_study_plan_html(PLAN_HTML, ENDPOINT, academic_year="2025/2026")
     assert [(item.code, item.name) for item in subjects] == [
@@ -85,7 +120,7 @@ def test_plan_parser_keeps_code_bound_to_adjacent_title_link() -> None:
 
 def test_parser_fails_closed_on_duplicates_and_schema_changes() -> None:
     duplicate = PLAN_HTML.replace("G1012107", "G1012106")
-    with pytest.raises(StudyPlanParseError, match="duplicado"):
+    with pytest.raises(StudyPlanParseError, match="contradictorios"):
         parse_study_plan_html(duplicate, ENDPOINT)
     changed = PLAN_HTML.replace("academic-subject-specs-list", "subject-specs")
     with pytest.raises(StudyPlanParseError):
@@ -93,6 +128,26 @@ def test_parser_fails_closed_on_duplicates_and_schema_changes() -> None:
     bad_code = PLAN_HTML.replace("G1012106", "G101206")
     with pytest.raises(StudyPlanParseError):
         parse_study_plan_html(bad_code, ENDPOINT)
+
+
+def test_parser_merges_same_subject_across_itineraries_and_accepts_variant_codes() -> None:
+    repeated = PLAN_HTML.replace("Cálculo 1", "Álxebra").replace(
+        "G1012107", "G1012106"
+    )
+    subjects = parse_study_plan_html(repeated, ENDPOINT)
+
+    assert len(subjects) == 1
+    assert len(subjects[0].sheet_urls) == 2
+
+    variant = PLAN_HTML.replace("G1012106", "G1012106A")
+    assert parse_study_plan_html(variant, ENDPOINT)[0].code == "G1012106A"
+
+
+def test_study_plan_sheet_round_trips_variant_code() -> None:
+    url = f"{CANONICAL}/20252026/materia-variante"
+    html = "<h1>Materia variante</h1><dl><dt>Código</dt><dd>g1012106b</dd></dl>"
+
+    assert parse_study_plan_sheet_html(html, url).code == "G1012106B"
 
 
 def test_ajax_insert_requires_replace_with_method() -> None:
@@ -139,6 +194,17 @@ async def test_client_rejects_year_mismatch_and_external_redirect() -> None:
         await UscStudyPlanClient(transport=httpx.MockTransport(redirect)).fetch_study_plan(ENDPOINT)
 
 
+async def test_client_exposes_http_status_without_text_classification() -> None:
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    with pytest.raises(StudyPlanHttpError) as captured:
+        await UscStudyPlanClient(
+            transport=httpx.MockTransport(forbidden)
+        ).fetch_study_plan(ENDPOINT)
+    assert captured.value.status_code == 403
+
+
 async def test_client_requires_drupal_to_confirm_requested_year() -> None:
     data = [command for command in json.loads(payload()) if command["command"] != "UpdateAcademicCourse"]
 
@@ -153,6 +219,44 @@ async def test_client_requires_drupal_to_confirm_requested_year() -> None:
         await UscStudyPlanClient(transport=httpx.MockTransport(handler)).fetch_study_plan(
             ENDPOINT, academic_year="2025/2026"
         )
+
+
+async def test_unoffered_year_is_distinct_from_schema_change_and_page_is_cached() -> None:
+    requests: list[httpx.Request] = []
+    other_year = "https://www.usc.gal/gl/course/77/study-plan-by-course/20872"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            text=(
+                "<h1>Grao en Matemáticas</h1>"
+                f'<a href="{other_year}">Curso 2026/2027</a>'
+            ),
+            headers={"content-type": "text/html"},
+        )
+
+    client = UscStudyPlanClient(transport=httpx.MockTransport(handler))
+    for _ in range(2):
+        with pytest.raises(StudyPlanAcademicYearUnavailable) as exc_info:
+            await client.fetch_study_plan(CANONICAL, academic_year="2025/2026")
+        assert exc_info.value.academic_year == "2025/2026"
+        assert exc_info.value.available_academic_years == ("2026/2027",)
+    assert len(requests) == 1
+
+
+async def test_page_without_any_plan_endpoint_is_a_schema_change() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="<h1>Grao sen estrutura de plans</h1>",
+            headers={"content-type": "text/html"},
+        )
+
+    with pytest.raises(StudyPlanSchemaChangedError, match="endpoints by-course"):
+        await UscStudyPlanClient(
+            transport=httpx.MockTransport(handler)
+        ).fetch_study_plan(CANONICAL, academic_year="2025/2026")
 
 
 @pytest.mark.parametrize(

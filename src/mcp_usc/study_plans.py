@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import unquote, urljoin, urlparse
@@ -17,12 +18,22 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from .exam_catalog import normalise_subject_code
+from .public_http_cache import (
+    DEFAULT_PUBLIC_HTTP_CACHE,
+    PublicHttpCache,
+    PublicHttpCacheMetadata,
+    PublicHttpError,
+    PublicHttpResponse,
+    PublicHttpStatusError,
+    SafePublicHttpFetcher,
+)
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.6 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)"
 _ACADEMIC_YEAR = re.compile(r"^20(?P<start>\d{2})/20(?P<end>\d{2})$")
-_SUBJECT_CODE = re.compile(r"^G\d{7}$")
 _AJAX_PATH = re.compile(r"^/(?:gl|es|en)/course/\d+/study-plan-by-course/\d+/?$")
+_MODULE_PATH = re.compile(r"^/(?:gl|es|en)/course/\d+/study-plan-by-module/\d+/?$")
 _STUDIES_PATH = re.compile(r"^/(?:gl|es|en)/(?:estudos|estudios|studies)(?:/[^/]+)+/?$")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -35,6 +46,40 @@ class StudyPlanError(RuntimeError):
 
 class StudyPlanParseError(StudyPlanError):
     """A response did not match the expected official USC structure."""
+
+
+class StudyPlanSchemaChangedError(StudyPlanParseError):
+    """The official response changed shape and was rejected before caching."""
+
+
+class StudyPlanAcademicYearUnavailable(StudyPlanError):
+    """The degree page does not advertise the requested academic year."""
+
+    def __init__(
+        self, academic_year: str, available_academic_years: tuple[str, ...]
+    ) -> None:
+        requested = _validate_academic_year(academic_year)
+        available = tuple(
+            dict.fromkeys(_validate_academic_year(value) for value in available_academic_years)
+        )
+        if not available or requested in available:
+            raise ValueError(
+                "La ausencia de curso requiere evidencia de otros cursos reconocidos"
+            )
+        self.academic_year = requested
+        self.available_academic_years = available
+        super().__init__(
+            f"La titulación no publica un plan para el curso {requested}; "
+            f"cursos anunciados: {', '.join(available)}"
+        )
+
+
+class StudyPlanHttpError(StudyPlanError):
+    """The allowed study-plan URL returned a structured HTTP failure."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"La fuente USC respondió con HTTP {status_code}")
 
 
 # Compatibility with the naming used by the other public USC clients.
@@ -53,12 +98,19 @@ class StudyPlanSubject:
     code: str
     name: str
     sheet_url: str
+    alternate_sheet_urls: tuple[str, ...] = ()
 
     @property
     def url(self) -> str:
         """Alias useful to callers that model links simply as ``url``."""
 
         return self.sheet_url
+
+    @property
+    def sheet_urls(self) -> tuple[str, ...]:
+        """All official sheet links when a subject appears in several itineraries."""
+
+        return (self.sheet_url, *self.alternate_sheet_urls)
 
 
 StudyPlanEntry = StudyPlanSubject
@@ -70,6 +122,7 @@ class StudyPlan:
     endpoint_url: str
     source_url: str
     subjects: tuple[StudyPlanSubject, ...]
+    cache_metadata: tuple[PublicHttpCacheMetadata, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +138,7 @@ class StudyPlanSheet:
     title: str
     code: str | None
     academic_year: str | None
+    cache_metadata: tuple[PublicHttpCacheMetadata, ...] = ()
 
 
 def _clean_text(value: str) -> str:
@@ -148,32 +202,59 @@ def discover_study_plan_endpoint(
         raise UnsafeUrlError("Se esperaba la URL canónica de una titulación USC")
     year = _validate_academic_year(academic_year)
     soup = BeautifulSoup(canonical_html, "html.parser")
-    candidates: list[str] = []
+    endpoints_by_year: dict[str, str] = {}
+    endpoint_years: dict[str, str] = {}
     for link in soup.select("a[href]"):
         label = _clean_text(link.get_text(" ", strip=True))
         if not label:
             # Drupal nests these anchors inside <template>; BeautifulSoup omits
             # TemplateString from get_text(), but the literal node remains available.
             label = _clean_text(str(link.string or link.get("aria-label", "")))
-        match = _YEAR_LABEL.fullmatch(label)
-        if not match or match.group(1) != year:
-            continue
         candidate = urljoin(canonical_url, str(link.get("href", "")))
         candidate_path = urlparse(candidate).path
-        if re.fullmatch(
-            r"/(?:gl|es|en)/course/\d+/study-plan-by-module/\d+/?", candidate_path
-        ):
+        if _MODULE_PATH.fullmatch(candidate_path):
             continue
-        if _validated_ajax_or_page(candidate) != "ajax":
-            raise UnsafeUrlError("El enlace de curso no apunta al endpoint de plan USC")
-        if candidate not in candidates:
-            candidates.append(candidate)
+        match = _YEAR_LABEL.fullmatch(label)
+        if not _AJAX_PATH.fullmatch(candidate_path):
+            if match:
+                raise StudyPlanParseError(
+                    "Una etiqueta de curso no apunta a un endpoint by-course"
+                )
+            continue
+        _validated_url(candidate, "ajax")
+        if not match:
+            raise StudyPlanParseError(
+                "Un endpoint by-course tiene una etiqueta de curso no reconocida"
+            )
+        linked_year = _validate_academic_year(match.group(1))
+        previous_endpoint = endpoints_by_year.get(linked_year)
+        if previous_endpoint is not None and previous_endpoint != candidate:
+            raise StudyPlanParseError(
+                f"El curso {linked_year} anuncia varios endpoints by-course"
+            )
+        previous_year = endpoint_years.get(candidate)
+        if previous_year is not None and previous_year != linked_year:
+            raise StudyPlanParseError(
+                "Un endpoint by-course aparece asociado a varios cursos"
+            )
+        endpoints_by_year[linked_year] = candidate
+        endpoint_years[candidate] = linked_year
+        if len(endpoint_years) > 20:
+            raise StudyPlanParseError("La página anuncia demasiados endpoints de planes")
+    if not endpoints_by_year:
+        raise StudyPlanParseError(
+            "La página no anuncia endpoints by-course con cursos reconocidos"
+        )
+    endpoint = endpoints_by_year.get(year)
+    if endpoint is None:
+        raise StudyPlanAcademicYearUnavailable(year, tuple(sorted(endpoints_by_year)))
+    candidates = {value for key, value in endpoints_by_year.items() if key == year}
     if len(candidates) != 1:
         raise StudyPlanParseError(
             f"Se esperaba un único enlace oficial para el curso {year}; encontrados: "
             f"{len(candidates)}"
         )
-    return candidates[0]
+    return endpoint
 
 
 # Short alias used by callers that do not distinguish discovery from parsing.
@@ -266,8 +347,8 @@ def parse_study_plan_html(
     if not isinstance(container, Tag):
         raise StudyPlanParseError("El fragmento del plan no contiene #study-plan-by-course")
     subjects: list[StudyPlanSubject] = []
-    seen: set[str] = set()
-    seen_urls: set[str] = set()
+    seen: dict[str, int] = {}
+    seen_urls: dict[str, str] = {}
     items = container.select("h3.at-title")
     if not items or len(items) > 2_000:
         raise StudyPlanParseError("El plan no contiene un número válido de materias")
@@ -289,16 +370,38 @@ def parse_study_plan_html(
         code_cells = specs.find_all("li", recursive=False)
         if not code_cells:
             raise StudyPlanParseError("Materia sin código académico")
-        code = _clean_text(code_cells[0].get_text(" ", strip=True))
-        if not _SUBJECT_CODE.fullmatch(code):
-            raise StudyPlanParseError("Código de materia no coincide exactamente con G\\d{7}")
-        if code in seen:
-            raise StudyPlanParseError(f"El plan contiene el código de materia duplicado {code}")
+        raw_code = _clean_text(code_cells[0].get_text(" ", strip=True))
+        try:
+            code = normalise_subject_code(raw_code)
+        except ValueError:
+            raise StudyPlanParseError(
+                "Código de materia no coincide con G seguido de 7 cifras y sufijo opcional"
+            ) from None
         sheet_url = _subject_url(str(link["href"]), source_url)
-        if sheet_url in seen_urls:
-            raise StudyPlanParseError("El plan contiene enlaces de fichas duplicados")
-        seen.add(code)
-        seen_urls.add(sheet_url)
+        if code in seen:
+            index = seen[code]
+            existing = subjects[index]
+            if name != existing.name:
+                raise StudyPlanParseError(
+                    f"El plan asigna títulos contradictorios al código {code}"
+                )
+            owner = seen_urls.get(sheet_url)
+            if owner is not None and owner != code:
+                raise StudyPlanParseError("Una ficha aparece asociada a varios códigos")
+            if sheet_url not in existing.sheet_urls:
+                subjects[index] = StudyPlanSubject(
+                    code=existing.code,
+                    name=existing.name,
+                    sheet_url=existing.sheet_url,
+                    alternate_sheet_urls=(*existing.alternate_sheet_urls, sheet_url),
+                )
+                seen_urls[sheet_url] = code
+            continue
+        owner = seen_urls.get(sheet_url)
+        if owner is not None and owner != code:
+            raise StudyPlanParseError("Una ficha aparece asociada a varios códigos")
+        seen[code] = len(subjects)
+        seen_urls[sheet_url] = code
         subjects.append(StudyPlanSubject(code=code, name=name, sheet_url=sheet_url))
     return tuple(subjects)
 
@@ -342,8 +445,12 @@ def parse_study_plan_sheet_html(html: str, source_url: str) -> StudyPlanSheet:
     codes: list[str] = []
     for element in soup.select("[data-subject-code]"):
         value = _clean_text(str(element.get("data-subject-code", "")))
-        if _SUBJECT_CODE.fullmatch(value) and value not in codes:
-            codes.append(value)
+        try:
+            code = normalise_subject_code(value)
+        except ValueError:
+            continue
+        if code not in codes:
+            codes.append(code)
     for label in soup.find_all(["dt", "b", "strong"]):
         if _clean_text(label.get_text(" ", strip=True)).casefold() not in {
             "código",
@@ -366,8 +473,12 @@ def parse_study_plan_sheet_html(html: str, source_url: str) -> StudyPlanSheet:
         else:
             value = ""
         value = _clean_text(value)
-        if _SUBJECT_CODE.fullmatch(value) and value not in codes:
-            codes.append(value)
+        try:
+            code = normalise_subject_code(value)
+        except ValueError:
+            continue
+        if code not in codes:
+            codes.append(code)
     if len(codes) > 1:
         raise StudyPlanParseError("La ficha contiene códigos de materia contradictorios")
     years = []
@@ -395,73 +506,80 @@ class UscStudyPlanClient:
         timeout: float = 20.0,
         max_bytes: int = 8_000_000,
         transport: httpx.AsyncBaseTransport | None = None,
+        cache: PublicHttpCache | None = None,
+        cache_ttl_seconds: float = 300.0,
+        cache_stale_if_error_seconds: float = 3_600.0,
+        cache_max_entries: int = 128,
+        cache_max_total_bytes: int = 64_000_000,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout debe ser positivo")
         if max_bytes < 1 or max_bytes > 20_000_000:
             raise ValueError("max_bytes debe estar entre 1 y 20000000")
+        if cache is None:
+            use_default = (
+                transport is None
+                and cache_ttl_seconds == 300.0
+                and cache_stale_if_error_seconds == 3_600.0
+                and cache_max_entries == 128
+                and cache_max_total_bytes == 64_000_000
+            )
+            cache = (
+                DEFAULT_PUBLIC_HTTP_CACHE
+                if use_default
+                else PublicHttpCache(
+                    ttl_seconds=cache_ttl_seconds,
+                    stale_if_error_seconds=cache_stale_if_error_seconds,
+                    max_entries=cache_max_entries,
+                    max_total_bytes=cache_max_total_bytes,
+                )
+            )
         self.timeout, self.max_bytes, self.transport = timeout, max_bytes, transport
+        self.cache = cache
+        self._fetcher = SafePublicHttpFetcher(
+            timeout=timeout,
+            max_bytes=max_bytes,
+            cache=cache,
+            transport=transport,
+        )
 
-    async def _get(self, url: str, *, kind: Literal["page", "ajax", "subject"]) -> bytes:
-        current = _validated_url(url, kind)
+    async def _get(
+        self,
+        url: str,
+        *,
+        kind: Literal["page", "ajax", "subject"],
+        validate: Callable[[bytes], None],
+    ) -> PublicHttpResponse:
+        _validated_url(url, kind)
         headers = {
             "User-Agent": _USER_AGENT,
             "Accept": "application/json" if kind == "ajax" else "text/html",
         }
         if kind == "ajax":
             headers["X-Requested-With"] = "XMLHttpRequest"
-        async with httpx.AsyncClient(
-            timeout=self.timeout, follow_redirects=False, transport=self.transport
-        ) as client:
-            for _ in range(5):
-                try:
-                    async with client.stream("GET", current, headers=headers) as response:
-                        if response.is_redirect:
-                            location = response.headers.get("location")
-                            if not location:
-                                raise StudyPlanError("Redirección USC sin destino")
-                            candidate = urljoin(current, location)
-                            old, new = urlparse(current), urlparse(candidate)
-                            if (new.scheme, new.hostname, new.port) != (
-                                old.scheme,
-                                old.hostname,
-                                old.port,
-                            ):
-                                raise UnsafeUrlError("Redirección fuera del origen exacto de USC")
-                            _validated_url(candidate, kind)
-                            client.cookies.clear()
-                            current = candidate
-                            continue
-                        if response.status_code >= 400:
-                            raise StudyPlanError(
-                                f"La fuente USC respondió con HTTP {response.status_code}"
-                            )
-                        if (
-                            kind == "ajax"
-                            and response.headers.get("content-type", "").split(";", 1)[0].casefold()
-                            != "application/json"
-                        ):
-                            raise StudyPlanParseError(
-                                "El endpoint de plan no devolvió application/json"
-                            )
-                        declared = response.headers.get("content-length")
-                        if declared and declared.isdigit() and int(declared) > self.max_bytes:
-                            raise StudyPlanError(
-                                f"La respuesta supera el límite de {self.max_bytes} bytes"
-                            )
-                        chunks: list[bytes] = []
-                        size = 0
-                        async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > self.max_bytes:
-                                raise StudyPlanError(
-                                    f"La respuesta supera el límite de {self.max_bytes} bytes"
-                                )
-                            chunks.append(chunk)
-                        return b"".join(chunks)
-                except httpx.HTTPError:
-                    raise StudyPlanError("No se pudo leer la fuente pública USC") from None
-        raise StudyPlanError("Demasiadas redirecciones en la fuente pública USC")
+        try:
+            def validate_response(response: PublicHttpResponse) -> None:
+                if kind == "ajax" and response.metadata.media_type != "application/json":
+                    raise StudyPlanSchemaChangedError(
+                        "El endpoint de plan no devolvió application/json"
+                    )
+                validate(response.content)
+
+            response = await self._fetcher.get(
+                url,
+                headers=headers,
+                validate_redirect=lambda candidate: _validated_url(candidate, kind),
+                validate=validate_response,
+            )
+        except PublicHttpStatusError as exc:
+            raise StudyPlanHttpError(exc.status_code) from None
+        except PublicHttpError as exc:
+            raise StudyPlanError(str(exc)) from None
+        return response
+
+    @staticmethod
+    def _schema_changed(error: BaseException) -> StudyPlanSchemaChangedError:
+        return StudyPlanSchemaChangedError(str(error))
 
     async def fetch_study_plan(self, url: str, *, academic_year: str | None = None) -> StudyPlan:
         kind = _validated_ajax_or_page(url)
@@ -471,34 +589,99 @@ class UscStudyPlanClient:
         if kind == "page":
             if academic_year is None:
                 raise ValueError("academic_year es obligatorio al partir de la página canónica")
-            page = await self._get(url, kind="page")
-            endpoint = discover_study_plan_endpoint(
-                page.decode("utf-8", errors="replace"), url, academic_year
-            )
+            def validate_page(content: bytes) -> None:
+                page_html = content.decode("utf-8", errors="replace")
+                try:
+                    discover_study_plan_endpoint(
+                        page_html, url, academic_year
+                    )
+                except StudyPlanAcademicYearUnavailable:
+                    # ``discover_study_plan_endpoint`` only emits this after
+                    # exhaustively validating one or more recognised other years.
+                    pass
+                except StudyPlanParseError as exc:
+                    raise self._schema_changed(exc) from None
+
+            page = await self._get(url, kind="page", validate=validate_page)
+            try:
+                endpoint = discover_study_plan_endpoint(
+                    page.content.decode("utf-8", errors="replace"), url, academic_year
+                )
+            except (StudyPlanParseError, ValueError) as exc:
+                raise self._schema_changed(exc) from None
+            metadata = [page.metadata]
         else:
             endpoint = url
-        payload = await self._get(endpoint, kind="ajax")
-        reported = study_plan_academic_year(payload)
-        if academic_year is not None and reported is None:
-            raise StudyPlanParseError("Drupal no confirmó el curso académico solicitado")
-        if reported is not None:
-            if academic_year is not None and reported != academic_year:
-                raise StudyPlanParseError(
-                    "El curso devuelto por Drupal no coincide con el solicitado"
+            metadata = []
+        def validate_payload(content: bytes) -> None:
+            try:
+                candidate_year = study_plan_academic_year(content)
+                if academic_year is not None and candidate_year is None:
+                    raise StudyPlanParseError(
+                        "Drupal no confirmó el curso académico solicitado"
+                    )
+                if (
+                    candidate_year is not None
+                    and academic_year is not None
+                    and candidate_year != academic_year
+                ):
+                    raise StudyPlanParseError(
+                        "El curso devuelto por Drupal no coincide con el solicitado"
+                    )
+                candidate_fragment = extract_study_plan_insert(content)
+                parse_study_plan_html(
+                    candidate_fragment,
+                    endpoint,
+                    academic_year=candidate_year or academic_year,
                 )
-            academic_year = reported
-        fragment = extract_study_plan_insert(payload)
-        subjects = parse_study_plan_html(fragment, endpoint, academic_year=academic_year)
+            except StudyPlanParseError as exc:
+                raise self._schema_changed(exc) from None
+
+        payload = await self._get(endpoint, kind="ajax", validate=validate_payload)
+        try:
+            reported = study_plan_academic_year(payload.content)
+            if academic_year is not None and reported is None:
+                raise StudyPlanParseError("Drupal no confirmó el curso académico solicitado")
+            if reported is not None:
+                if academic_year is not None and reported != academic_year:
+                    raise StudyPlanParseError(
+                        "El curso devuelto por Drupal no coincide con el solicitado"
+                    )
+                academic_year = reported
+            fragment = extract_study_plan_insert(payload.content)
+            subjects = parse_study_plan_html(fragment, endpoint, academic_year=academic_year)
+        except (StudyPlanParseError, ValueError) as exc:
+            raise self._schema_changed(exc) from None
+        metadata.append(payload.metadata)
         return StudyPlan(
             academic_year=academic_year,
             endpoint_url=endpoint,
             source_url=source_url,
             subjects=subjects,
+            cache_metadata=tuple(metadata),
         )
 
     async def fetch_subject_sheet(self, url: str) -> StudyPlanSheet:
-        content = await self._get(url, kind="subject")
-        return parse_study_plan_sheet_html(content.decode("utf-8", errors="replace"), url)
+        def validate_sheet(candidate: bytes) -> None:
+            try:
+                parse_study_plan_sheet_html(candidate.decode("utf-8", errors="replace"), url)
+            except (StudyPlanParseError, ValueError) as exc:
+                raise self._schema_changed(exc) from None
+
+        content = await self._get(url, kind="subject", validate=validate_sheet)
+        try:
+            parsed = parse_study_plan_sheet_html(
+                content.content.decode("utf-8", errors="replace"), url
+            )
+        except (StudyPlanParseError, ValueError) as exc:
+            raise self._schema_changed(exc) from None
+        return StudyPlanSheet(
+            source_url=parsed.source_url,
+            title=parsed.title,
+            code=parsed.code,
+            academic_year=parsed.academic_year,
+            cache_metadata=(content.metadata,),
+        )
 
 
 # Alternative spelling used by a few integrations.
@@ -511,6 +694,9 @@ extract_study_plan_html = extract_study_plan_insert
 __all__ = [
     "StudyPlanError",
     "StudyPlanParseError",
+    "StudyPlanSchemaChangedError",
+    "StudyPlanAcademicYearUnavailable",
+    "StudyPlanHttpError",
     "StudyPlansError",
     "StudyPlansParseError",
     "StudyPlanSubject",

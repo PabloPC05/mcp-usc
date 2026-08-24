@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import unquote, urljoin, urlparse
@@ -11,12 +12,20 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from .exam_catalog import normalise_subject_code
+from .public_http_cache import (
+    DEFAULT_PUBLIC_HTTP_CACHE,
+    PublicHttpCache,
+    PublicHttpCacheMetadata,
+    PublicHttpError,
+    PublicHttpResponse,
+    SafePublicHttpFetcher,
+)
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.6 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)"
 _ACADEMIC_YEAR = re.compile(r"^20(?P<start>\d{2})/20(?P<end>\d{2})$")
 _PLAN_CLASS = re.compile(r"^is-type-(?P<plan_id>\d+)$")
-_SUBJECT_CODE = re.compile(r"^G\d{7}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _AJAX_PATH = re.compile(r"^/(?:gl|es|en)/course/\d+/schedules-exams-calendar/\d+/?$")
@@ -33,6 +42,10 @@ class ExamCalendarError(RuntimeError):
 
 class ExamCalendarParseError(ExamCalendarError):
     """The official page did not match the expected, fail-closed structure."""
+
+
+class ExamCalendarSchemaChangedError(ExamCalendarParseError):
+    """The official response changed shape and was rejected before caching."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +69,7 @@ class ExamCalendar:
     academic_year: str | None
     endpoint_url: str
     subjects: tuple[ExamSubject, ...]
+    cache_metadata: tuple[PublicHttpCacheMetadata, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +89,7 @@ class SubjectSheet:
     # USC subject sheets do not always print the academic code. It stays absent rather
     # than being guessed from a same-named entry in another plan.
     code: str | None = None
+    cache_metadata: tuple[PublicHttpCacheMetadata, ...] = ()
 
 
 def _clean_text(value: str) -> str:
@@ -377,8 +392,12 @@ def _explicit_subject_code(soup: BeautifulSoup) -> str | None:
         if element.name in {"script", "style", "template"}:
             continue
         value = _clean_text(str(element.get("data-subject-code") or element.get_text(" ")))
-        if _SUBJECT_CODE.fullmatch(value) and value not in candidates:
-            candidates.append(value)
+        try:
+            code = normalise_subject_code(value)
+        except ValueError:
+            continue
+        if code not in candidates:
+            candidates.append(code)
     code_labels = {"codigo", "codigo da materia", "subject code", "code"}
     for label in soup.find_all(["dt", "b", "strong"]):
         if _normalise_label(label.get_text(" ", strip=True)) not in code_labels:
@@ -393,8 +412,12 @@ def _explicit_subject_code(soup: BeautifulSoup) -> str | None:
             label_text = label.get_text(" ", strip=True)
             value = parent_text.removeprefix(label_text).strip(" :")
         value = _clean_text(value)
-        if _SUBJECT_CODE.fullmatch(value) and value not in candidates:
-            candidates.append(value)
+        try:
+            code = normalise_subject_code(value)
+        except ValueError:
+            continue
+        if code not in candidates:
+            candidates.append(code)
     if len(candidates) > 1:
         raise ExamCalendarParseError("La ficha contiene códigos de materia contradictorios")
     return candidates[0] if candidates else None
@@ -482,20 +505,55 @@ class UscExamCalendarClient:
         timeout: float = 20.0,
         max_bytes: int = 5_000_000,
         transport: httpx.AsyncBaseTransport | None = None,
+        cache: PublicHttpCache | None = None,
+        cache_ttl_seconds: float = 300.0,
+        cache_stale_if_error_seconds: float = 3_600.0,
+        cache_max_entries: int = 128,
+        cache_max_total_bytes: int = 64_000_000,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout debe ser positivo")
         if max_bytes < 1 or max_bytes > 20_000_000:
             raise ValueError("max_bytes debe estar entre 1 y 20000000")
+        if cache is None:
+            use_default = (
+                transport is None
+                and cache_ttl_seconds == 300.0
+                and cache_stale_if_error_seconds == 3_600.0
+                and cache_max_entries == 128
+                and cache_max_total_bytes == 64_000_000
+            )
+            cache = (
+                DEFAULT_PUBLIC_HTTP_CACHE
+                if use_default
+                else PublicHttpCache(
+                    ttl_seconds=cache_ttl_seconds,
+                    stale_if_error_seconds=cache_stale_if_error_seconds,
+                    max_entries=cache_max_entries,
+                    max_total_bytes=cache_max_total_bytes,
+                )
+            )
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.transport = transport
+        self.cache = cache
+        self._fetcher = SafePublicHttpFetcher(
+            timeout=timeout,
+            max_bytes=max_bytes,
+            cache=cache,
+            transport=transport,
+        )
 
-    async def _get(self, url: str, *, kind: Literal["page", "ajax", "subject"]) -> bytes:
-        current = url
+    async def _get(
+        self,
+        url: str,
+        *,
+        kind: Literal["page", "ajax", "subject"],
+        validate: Callable[[bytes], None],
+    ) -> PublicHttpResponse:
         if kind == "subject":
-            _validated_subject_url(current)
-        elif _validated_calendar_url(current) != kind:
+            _validated_subject_url(url)
+        elif _validated_calendar_url(url) != kind:
             raise UnsafeUrlError("Tipo de URL de calendario inesperado")
         headers = {
             "User-Agent": _USER_AGENT,
@@ -503,74 +561,33 @@ class UscExamCalendarClient:
         }
         if kind == "ajax":
             headers["X-Requested-With"] = "XMLHttpRequest"
-        async with httpx.AsyncClient(
-            timeout=self.timeout,
-            follow_redirects=False,
-            transport=self.transport,
-        ) as client:
-            for _ in range(5):
-                try:
-                    async with client.stream("GET", current, headers=headers) as response:
-                        if response.is_redirect:
-                            location = response.headers.get("location")
-                            if not location:
-                                raise ExamCalendarError("Redirección USC sin destino")
-                            candidate = urljoin(current, location)
-                            current_origin = urlparse(current)
-                            candidate_origin = urlparse(candidate)
-                            if (
-                                candidate_origin.scheme,
-                                candidate_origin.hostname,
-                                candidate_origin.port,
-                            ) != (
-                                current_origin.scheme,
-                                current_origin.hostname,
-                                current_origin.port,
-                            ):
-                                raise UnsafeUrlError(
-                                    "Redirección fuera del origen exacto de la fuente USC"
-                                )
-                            if kind == "subject":
-                                _validated_subject_url(candidate)
-                            elif _validated_calendar_url(candidate) != kind:
-                                raise UnsafeUrlError(
-                                    "Redirección fuera del tipo de recurso esperado"
-                                )
-                            # This client never imports or propagates a browser/auth cookie.
-                            client.cookies.clear()
-                            current = candidate
-                            continue
-                        if response.status_code >= 400:
-                            raise ExamCalendarError(
-                                f"La fuente USC respondió con HTTP {response.status_code}"
-                            )
-                        media_type = response.headers.get("content-type", "").split(";", 1)[0]
-                        if kind == "ajax" and media_type.lower() != "application/json":
-                            raise ExamCalendarParseError(
-                                "El endpoint de calendario no devolvió application/json"
-                            )
-                        declared_size = response.headers.get("content-length")
-                        if (
-                            declared_size
-                            and declared_size.isdigit()
-                            and int(declared_size) > self.max_bytes
-                        ):
-                            raise ExamCalendarError(
-                                f"La respuesta supera el límite de {self.max_bytes} bytes"
-                            )
-                        chunks: list[bytes] = []
-                        size = 0
-                        async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > self.max_bytes:
-                                raise ExamCalendarError(
-                                    f"La respuesta supera el límite de {self.max_bytes} bytes"
-                                )
-                            chunks.append(chunk)
-                        return b"".join(chunks)
-                except httpx.HTTPError:
-                    raise ExamCalendarError("No se pudo leer la fuente pública USC") from None
-        raise ExamCalendarError("Demasiadas redirecciones en la fuente pública USC")
+        def validate_redirect(candidate: str) -> None:
+            if kind == "subject":
+                _validated_subject_url(candidate)
+            elif _validated_calendar_url(candidate) != kind:
+                raise UnsafeUrlError("Redirección fuera del tipo de recurso esperado")
+
+        try:
+            def validate_response(response: PublicHttpResponse) -> None:
+                if kind == "ajax" and response.metadata.media_type != "application/json":
+                    raise ExamCalendarSchemaChangedError(
+                        "El endpoint de calendario no devolvió application/json"
+                    )
+                validate(response.content)
+
+            response = await self._fetcher.get(
+                url,
+                headers=headers,
+                validate_redirect=validate_redirect,
+                validate=validate_response,
+            )
+        except PublicHttpError as exc:
+            raise ExamCalendarError(str(exc)) from None
+        return response
+
+    @staticmethod
+    def _schema_changed(error: BaseException) -> ExamCalendarSchemaChangedError:
+        return ExamCalendarSchemaChangedError(str(error))
 
     async def fetch_calendar(
         self,
@@ -586,34 +603,86 @@ class UscExamCalendarClient:
         if url_kind == "page":
             if academic_year is None:
                 raise ValueError("academic_year es obligatorio al partir de la página canónica")
-            page = await self._get(url, kind="page")
-            endpoint = discover_calendar_endpoint(
-                page.decode("utf-8", errors="replace"), url, academic_year
-            )
+            def validate_page(content: bytes) -> None:
+                try:
+                    discover_calendar_endpoint(
+                        content.decode("utf-8", errors="replace"), url, academic_year
+                    )
+                except ExamCalendarParseError as exc:
+                    raise self._schema_changed(exc) from None
+
+            page = await self._get(url, kind="page", validate=validate_page)
+            try:
+                endpoint = discover_calendar_endpoint(
+                    page.content.decode("utf-8", errors="replace"), url, academic_year
+                )
+            except (ExamCalendarParseError, ValueError) as exc:
+                raise self._schema_changed(exc) from None
+            metadata = [page.metadata]
         else:
             endpoint = url
-        payload = await self._get(endpoint, kind="ajax")
-        reported_year = _ajax_academic_year(payload)
-        if reported_year is not None:
-            _validate_academic_year(reported_year)
-            if academic_year is not None and reported_year != academic_year:
-                raise ExamCalendarParseError(
-                    "El curso devuelto por Drupal no coincide con el solicitado"
-                )
-            academic_year = reported_year
-        calendar_html = extract_calendar_insert(payload)
-        subjects = parse_exam_calendar_html(
-            calendar_html,
-            plan_id=plan_id,
-            subject_name=subject_name,
-        )
+            metadata = []
+        def validate_payload(content: bytes) -> None:
+            try:
+                candidate_year = _ajax_academic_year(content)
+                if candidate_year is not None:
+                    _validate_academic_year(candidate_year)
+                    if academic_year is not None and candidate_year != academic_year:
+                        raise ExamCalendarParseError(
+                            "El curso devuelto por Drupal no coincide con el solicitado"
+                        )
+                candidate_html = extract_calendar_insert(content)
+                parse_exam_calendar_html(candidate_html)
+            except ExamCalendarParseError as exc:
+                raise self._schema_changed(exc) from None
+
+        payload = await self._get(endpoint, kind="ajax", validate=validate_payload)
+        try:
+            reported_year = _ajax_academic_year(payload.content)
+            if reported_year is not None:
+                _validate_academic_year(reported_year)
+                if academic_year is not None and reported_year != academic_year:
+                    raise ExamCalendarParseError(
+                        "El curso devuelto por Drupal no coincide con el solicitado"
+                    )
+                academic_year = reported_year
+            calendar_html = extract_calendar_insert(payload.content)
+            subjects = parse_exam_calendar_html(
+                calendar_html,
+                plan_id=plan_id,
+                subject_name=subject_name,
+            )
+        except (ExamCalendarParseError, ValueError) as exc:
+            raise self._schema_changed(exc) from None
+        metadata.append(payload.metadata)
         return ExamCalendar(
             academic_year=academic_year,
             endpoint_url=endpoint,
             subjects=subjects,
+            cache_metadata=tuple(metadata),
         )
 
     async def fetch_subject_sheet(self, url: str) -> SubjectSheet:
         _validated_subject_url(url)
-        content = await self._get(url, kind="subject")
-        return parse_subject_sheet_html(content.decode("utf-8", errors="replace"), url)
+        def validate_sheet(candidate: bytes) -> None:
+            try:
+                parse_subject_sheet_html(candidate.decode("utf-8", errors="replace"), url)
+            except (ExamCalendarParseError, ValueError) as exc:
+                raise self._schema_changed(exc) from None
+
+        content = await self._get(url, kind="subject", validate=validate_sheet)
+        try:
+            parsed = parse_subject_sheet_html(
+                content.content.decode("utf-8", errors="replace"), url
+            )
+        except (ExamCalendarParseError, ValueError) as exc:
+            raise self._schema_changed(exc) from None
+        return SubjectSheet(
+            source_url=parsed.source_url,
+            title=parsed.title,
+            academic_year=parsed.academic_year,
+            semester=parsed.semester,
+            exam_slots=parsed.exam_slots,
+            code=parsed.code,
+            cache_metadata=(content.metadata,),
+        )

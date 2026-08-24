@@ -12,7 +12,10 @@ MATHEMATICS_EXAM_CALENDAR_URL = (
     "https://www.usc.gal/gl/centro/facultade-matematicas/calendarios/convocatorias"
 )
 
-_COURSE_CODE = re.compile(r"(?<![A-Z0-9])G\d{7}(?!\d)", re.IGNORECASE)
+SUBJECT_CODE_PATTERN = re.compile(r"G\d{7}[A-Z]?", re.IGNORECASE)
+SUBJECT_CODE_SEARCH_PATTERN = re.compile(
+    r"(?<![A-Z0-9])G\d{7}[A-Z]?(?![A-Z0-9])", re.IGNORECASE
+)
 _ACADEMIC_YEAR = re.compile(r"^(20\d{2})/(20\d{2})$")
 _EMBEDDED_ACADEMIC_YEAR = re.compile(
     r"(?<!\d)(20\d{2})\s*[/\-]\s*(20)?(\d{2})(?!\d)"
@@ -67,8 +70,11 @@ def normalise_subject_code(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("El código de asignatura debe ser texto")
     code = value.strip().upper()
-    if not _COURSE_CODE.fullmatch(code):
-        raise ValueError("El código de asignatura debe tener el formato G seguido de 7 cifras")
+    if not SUBJECT_CODE_PATTERN.fullmatch(code):
+        raise ValueError(
+            "El código de asignatura debe tener el formato G, 7 cifras "
+            "y un sufijo A-Z opcional"
+        )
     return code
 
 
@@ -78,7 +84,7 @@ def normalise_subject_title(value: str) -> str:
 
 def extract_subject_code(*values: object) -> str | None:
     for value in values:
-        match = _COURSE_CODE.search(str(value or ""))
+        match = SUBJECT_CODE_SEARCH_PATTERN.search(str(value or ""))
         if match:
             return match.group(0).upper()
     return None

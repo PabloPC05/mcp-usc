@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from functools import lru_cache
 
 warnings.filterwarnings(
     "ignore",
@@ -11,8 +12,11 @@ warnings.filterwarnings(
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 
+from .degree_catalog import USC_DEGREE_CATALOG_URL  # noqa: E402
 from .exam_catalog import DEGREE_EXAM_PROFILES, OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
+from .public_http_cache import PublicHttpCache  # noqa: E402
 from .service import UscService  # noqa: E402
+from .settings import Settings  # noqa: E402
 
 INSTRUCTIONS = (
     "Servidor local para la USC. Usa primero auth_status. Las herramientas list/get/search/read "
@@ -59,8 +63,32 @@ STATEFUL_READ = ToolAnnotations(
 )
 
 
+@lru_cache(maxsize=4)
+def _process_public_cache(
+    ttl_seconds: float,
+    stale_if_error_seconds: float,
+    max_entries: int,
+    max_total_bytes: int,
+) -> PublicHttpCache:
+    """Keep only anonymous public GET state alive across MCP invocations."""
+
+    return PublicHttpCache(
+        ttl_seconds=ttl_seconds,
+        stale_if_error_seconds=stale_if_error_seconds,
+        max_entries=max_entries,
+        max_total_bytes=max_total_bytes,
+    )
+
+
 def _service() -> UscService:
-    return UscService()
+    settings = Settings.from_env()
+    public_cache = _process_public_cache(
+        settings.public_cache_ttl_seconds,
+        settings.public_cache_stale_if_error_seconds,
+        settings.public_cache_max_entries,
+        settings.public_cache_max_total_bytes,
+    )
+    return UscService(settings, public_http_cache=public_cache)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -688,6 +716,7 @@ async def list_exam_sources() -> dict:
     sources = list(_service().settings.exam_sources)
     return {
         "official_structured_sources": list(OFFICIAL_EXAM_CALENDAR_URLS),
+        "official_degree_catalog_source": USC_DEGREE_CATALOG_URL,
         "official_study_plan_sources": [
             profile.study_plan_url for profile in DEGREE_EXAM_PROFILES.values()
         ],
@@ -705,6 +734,28 @@ async def search_exam_dates(
 ) -> dict:
     """Busca evidencias de fechas en páginas/PDF oficiales USC y conserva URL/página."""
     return await _service().search_exams(query, source_urls, max_documents)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_usc_degrees() -> dict:
+    """Lista las titulaciones actuales enlazadas por el catálogo público oficial USC."""
+
+    return await _service().list_usc_degrees()
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def locate_usc_subject_codes(
+    subject_codes: list[str],
+    academic_year: str,
+    area_slugs: list[str] | None = None,
+    degree_urls: list[str] | None = None,
+    concurrency: int = 8,
+) -> dict:
+    """Localiza códigos G exactos en los planes oficiales de todos los grados actuales."""
+
+    return await _service().locate_usc_subject_codes(
+        subject_codes, academic_year, area_slugs, degree_urls, concurrency
+    )
 
 
 @mcp.tool(annotations=READ_ONLY)
