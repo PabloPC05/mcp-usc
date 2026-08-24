@@ -59,7 +59,8 @@ operaciones remotas de v0.8.
 | `uv build` | wheel y sdist 0.9.0 generados |
 | Instalación aislada del wheel | versión de paquete e import 0.9.0 correctos |
 | Enlaces Markdown relativos | todos resuelven |
-| CI multiplataforma | [seis jobs correctos](https://github.com/PabloPC05/mcp-usc/actions/runs/32768159950) |
+| CI multiplataforma | [seis jobs correctos](https://github.com/PabloPC05/mcp-usc/actions/runs/32768327814) |
+| Release automática | [workflow completo correcto](https://github.com/PabloPC05/mcp-usc/actions/runs/32768411924) |
 | Demo Moodle | no repetida; v0.9 no modifica rutas remotas y no había credenciales públicas configuradas |
 
 No se ejecutaron mensajes, foros, entregas, cuestionarios ni otras operaciones sobre el Campus.
@@ -71,9 +72,11 @@ No se ejecutaron mensajes, foros, entregas, cuestionarios ni otras operaciones s
 - El proyecto permanece en SDK MCP 1.29.x con límite `<2`; la migración a 2.x requiere una revisión
   separada por sus cambios incompatibles.
 - La disponibilidad Moodle real continúa dependiendo de versión, plugins, servicio y permisos.
-- La publicación automática debe verificarse sobre el primer tag v0.9.0 antes de cerrar la release.
+- La primera publicación automática se completó correctamente; futuros cambios del proveedor de
+  Actions o GitHub CLI siguen siendo una dependencia operativa externa.
 
 ## Conclusión
 
-No se identificaron bloqueos en el candidato. La superficie nueva es aditiva, local y no amplía
-autoridad; el candidato queda apto para etiquetar cuando el commit final de documentación pase CI.
+No se identificaron bloqueos. La superficie nueva es aditiva, local y no amplía autoridad. El tag
+`v0.9.0` publicó wheel, sdist y `SHA256SUMS`; los hashes del archivo coinciden con los digests que
+GitHub muestra para ambos artefactos.
