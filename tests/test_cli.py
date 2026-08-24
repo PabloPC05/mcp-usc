@@ -88,6 +88,6 @@ def test_manifest_cli_outputs_the_local_contract(monkeypatch, capsys) -> None:
     cli.main()
 
     result = json.loads(capsys.readouterr().out)
-    assert result["version"] == "0.9.0"
-    assert result["counts"] == {"tools": 84, "resources": 4, "prompts": 4}
+    assert result["version"] == "0.11.0"
+    assert result["counts"] == {"tools": 91, "resources": 4, "prompts": 4}
     assert result["network_contacted"] is False

@@ -62,6 +62,26 @@ class CampusError(RuntimeError):
 class AuthenticationRequired(CampusError):
     """The configured Moodle credential is absent, expired, or invalid."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session_expired",
+        action: str = "renew_session",
+    ) -> None:
+        # Keep the human-readable exception contract while exposing a stable, secret-free
+        # diagnostic for callers such as the CLI.  Never put a cookie/sesskey in this object.
+        if code == "session_expired" and message.startswith("No hay"):
+            code, action = "session_missing", "import_or_login"
+        elif code == "session_expired" and "formato" in message.casefold():
+            code, action = "session_invalid_local", "forget_and_import"
+        super().__init__(message)
+        self.code = code
+        self.action = action
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "action": self.action, "message": str(self)}
+
 
 class CampusProtocolError(CampusError):
     """Moodle returned an unexpected or unsupported response."""
@@ -597,7 +617,7 @@ class RestMoodleGateway(CampusGateway):
         return [course for course in courses if _course_is_current(course)]
 
     async def action_events(self, start: int, end: int, limit: int) -> list[dict[str, Any]]:
-        _validate_limit(limit)
+        _validate_limit(limit, maximum=50)
         if start < 0 or end <= start:
             raise ValueError("El intervalo de eventos no es válido")
         payload = await self._call(
@@ -773,7 +793,10 @@ class HttpSessionMoodleGateway(CampusGateway):
         )
 
     @staticmethod
-    def _ensure_authenticated_response(response: httpx.Response) -> None:
+    def _ensure_authenticated_response(
+        response: httpx.Response,
+        body: bytes | None = None,
+    ) -> None:
         if HttpSessionMoodleGateway._is_auth_failure_response(response):
             raise AuthenticationRequired(
                 "La sesión del Campus Virtual ha caducado. Ejecuta `mcp-usc login`."
@@ -782,6 +805,31 @@ class HttpSessionMoodleGateway(CampusGateway):
             raise AuthenticationRequired(
                 "La sesión del Campus Virtual ha caducado. Ejecuta `mcp-usc login`."
             )
+        # Some proxies return the login page with HTTP 200 instead of a redirect. Only an
+        # unmistakable Moodle login form is treated as expiry; ordinary HTML stays supported.
+        content_type = response.headers.get("content-type", "").casefold()
+        if body is None:
+            try:
+                body = response.content
+            except httpx.ResponseNotRead:
+                # Streaming callers repeat this check with their bounded body after reading it.
+                body = b""
+        prefix = body.lstrip()[:32].lower()
+        if (
+            (
+                "html" in content_type
+                or prefix.startswith((b"<html", b"<!doctype", b"<form"))
+            )
+            and len(body) <= 5 * 1024 * 1024
+        ):
+            soup = BeautifulSoup(body.decode("utf-8", errors="replace"), "html.parser")
+            if _looks_like_login(soup, str(response.url)):
+                raise AuthenticationRequired(
+                    "La sesión del Campus Virtual ha caducado. Renueva la sesión con "
+                    "`mcp-usc import-session` o `mcp-usc login`.",
+                    code="session_expired",
+                    action="renew_session",
+                )
         if response.is_redirect:
             raise CampusProtocolError("Moodle devolvió una redirección HTTP inesperada.")
         if response.status_code >= 400:
@@ -851,6 +899,7 @@ class HttpSessionMoodleGateway(CampusGateway):
                 self._ensure_authenticated_response(response)
                 self._remember_rotated_cookie(response, cookie)
                 content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
+                self._ensure_authenticated_response(response, content)
         except CampusError:
             raise
         except httpx.HTTPError:
@@ -919,6 +968,7 @@ class HttpSessionMoodleGateway(CampusGateway):
                         continue
                     self._ensure_authenticated_response(response)
                     content = await _read_limited_response(response, max_bytes)
+                    self._ensure_authenticated_response(response, content)
                     media_type = response.headers.get("content-type", "").split(";", 1)[0]
                     final_url = urlunparse((*urlparse(str(response.url))[:3], "", "", ""))
                     await response.aclose()
@@ -1155,7 +1205,7 @@ class HttpSessionMoodleGateway(CampusGateway):
         return courses
 
     async def action_events(self, start: int, end: int, limit: int) -> list[dict[str, Any]]:
-        _validate_limit(limit)
+        _validate_limit(limit, maximum=50)
         if start < 0 or end <= start:
             raise ValueError("El intervalo de eventos no es válido")
         payload = await self._ajax(

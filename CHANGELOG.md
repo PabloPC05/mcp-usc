@@ -4,6 +4,43 @@ Los cambios relevantes de `mcp-usc` se documentan aquí. El proyecto sigue
 [Versionado Semántico](https://semver.org/lang/es/) durante la fase beta: una versión menor puede
 ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente.
 
+## [0.11.0] - 2026-08-25
+
+### Añadido
+
+- descubrimiento de páginas oficiales de horario desde una titulación y sus centros;
+- consulta semanal de clases por curso académico, semestre, fecha, grupos y materia;
+- resolución por titulación seleccionada y agregación automática de sus centros;
+- selección explícita de `program_id` cuando la USC conserva planes homónimos;
+- sesiones estructuradas con fecha, horas, tipo lectivo, grupo, aula, materia y fuentes USC;
+- conservación de franjas que la fuente marca con varios tipos lectivos;
+- representación explícita `no_data` para centros que no publican horario en el curso solicitado.
+- listados básicos de cuestionarios, contenidos, recursos y foros desde el estado AJAX puro de los
+  cursos cuando la sesión no dispone de sus funciones REST;
+- perfil académico local validado y `get_my_class_timetable` para consultar horario sin repetir
+  titulación, curso, plan y grupos;
+- previews y acciones contextuales para finalización manual de actividades y auto-finalización de
+  cursos cuando Moodle publica el criterio propio correspondiente;
+- diagnósticos seguros y accionables para sesiones ausentes, inválidas o caducadas;
+- fixtures del contrato común de sesión para Moodle 4.5, 5.0 y 5.2.
+
+### Seguridad
+
+- todas las consultas de horarios son GET públicos anónimos, sin cookies ni Playwright;
+- rutas de titulación, centro, horario, AJAX y fichas quedan en allowlists separadas;
+- los enlaces encadenados deben conservar plan, curso, controlador, semestre y centro;
+- planes homónimos y titulaciones multicentro permanecen separados y nunca se fusionan por nombre.
+- las nuevas acciones de finalización exigen estado propio, contexto exacto, preview, confirmación
+  de un solo uso y una única mutación sin reintentos.
+- el proceso MCP silencia el logging informativo de `httpx`/`httpcore` para impedir que valores
+  `sesskey` de AJAX o cabeceras autenticadas aparezcan en stderr.
+
+### Corregido
+
+- el Timeline respeta el máximo real de 50 elementos de Moodle;
+- la fecha formateada de un evento ya no se confunde con el entero `timeusermidnight`.
+- una página de login devuelta con HTTP 200 se reconoce también después de lecturas AJAX acotadas.
+
 ## [0.9.0] - 2026-08-24
 
 ### Añadido
@@ -66,6 +103,7 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - acciones contextuales para calendario, foros y Choice con confirmación;
 - cobertura de tareas, cuestionarios y transportes REST/sesión.
 
+[0.11.0]: https://github.com/PabloPC05/mcp-usc/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/PabloPC05/mcp-usc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/PabloPC05/mcp-usc/releases/tag/v0.8.0
 [0.7.0]: https://github.com/PabloPC05/mcp-usc/commit/d9320ad875a058e5ff30e76514ed37f6667cc241

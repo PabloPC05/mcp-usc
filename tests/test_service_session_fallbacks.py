@@ -106,6 +106,49 @@ class FakeSessionGateway:
         self.invoke_calls: list[str] = []
         self.ambiguous = False
         self.forms_enabled = True
+        self.course_state: dict[str, Any] = {
+            "section": [
+                {"id": "70", "section": 1, "title": "Tema <b>1</b>", "visible": True}
+            ],
+            "cm": [
+                {
+                    "id": 17,
+                    "module": "assign",
+                    "modname": "assign",
+                    "name": "Tarea",
+                    "sectionid": "70",
+                    "sectionnumber": 1,
+                    "uservisible": True,
+                },
+                {
+                    "id": 18,
+                    "module": "quiz",
+                    "modname": "Proba",
+                    "name": "Quiz",
+                    "sectionid": "70",
+                    "sectionnumber": 1,
+                    "url": "https://cv.usc.es/mod/quiz/view.php?id=18",
+                },
+                {
+                    "id": 19,
+                    "module": "forum",
+                    "modname": "forum",
+                    "name": "Foro",
+                    "sectionid": "70",
+                    "sectionnumber": 1,
+                    "url": "https://cv.usc.es/mod/forum/view.php?id=19",
+                },
+                {
+                    "id": 20,
+                    "module": "resource",
+                    "modname": "resource",
+                    "name": "Guía",
+                    "sectionid": "70",
+                    "sectionnumber": 1,
+                    "url": "https://cv.usc.es/mod/resource/view.php?id=20",
+                },
+            ],
+        }
 
     async def status(self) -> dict[str, Any]:
         return {"authenticated": True, "user_id": 5}
@@ -113,12 +156,7 @@ class FakeSessionGateway:
     async def invoke(self, function: str, arguments: Mapping[str, Any]) -> Any:
         self.invoke_calls.append(function)
         if function == "core_courseformat_get_state":
-            return {
-                "cm": [
-                    {"id": 17, "module": "assign", "name": "Tarea", "uservisible": True},
-                    {"id": 18, "module": "quiz", "name": "Quiz"},
-                ]
-            }
+            return self.course_state
         if self.ambiguous:
             raise CampusProtocolError(f"respuesta ambigua de {function}")
         raise CampusCapabilityUnavailable(f"{function} no está disponible")
@@ -303,6 +341,121 @@ async def test_session_list_assignments_uses_ajax_course_state_and_exposes_only_
     ]
     assert gateway.invoke_calls == ["core_courseformat_get_state"]
     assert gateway.forms.calls == []
+
+
+async def test_session_lists_quizzes_from_ajax_state_without_opening_pages() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    result = await service.list_quizzes([7])
+
+    assert result["quizzes"][0]["quiz_id"] is None
+    assert result["quizzes"][0]["course_module_id"] == 18
+    assert result["quizzes"][0]["activity_url"].endswith("id=18")
+    assert result["quizzes"][0]["opening_may_record_view"] is True
+    assert gateway.invoke_calls == ["core_courseformat_get_state"]
+    assert gateway.forms.calls == []
+
+
+async def test_session_lists_course_contents_as_limited_metadata() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    result = await service.list_course_contents(7, 70, 0, 100)
+
+    assert result["metadata_only"] is True
+    assert result["total_count"] == 4
+    assert {item["module_type"] for item in result["items"]} == {
+        "assign",
+        "forum",
+        "quiz",
+        "resource",
+    }
+    assert all(item["files"] == [] for item in result["items"])
+    assert all(item["url"] is None for item in result["items"])
+    assert result["items"][0]["section_name"] == "Tema 1"
+    assert gateway.forms.calls == []
+
+
+async def test_session_resource_listing_never_issues_download_tokens_for_view_pages() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    result = await service.list_course_resources(7, None, 0, 100)
+
+    assert result["metadata_only"] is True
+    assert result["total_count"] == 1
+    assert result["items"][0]["module_type"] == "resource"
+    assert result["items"][0]["resource_token"] is None
+    assert result["items"][0]["downloadable"] is False
+    assert result["items"][0]["activity_url"].endswith("id=20")
+    assert gateway.forms.calls == []
+
+
+async def test_session_lists_forums_without_claiming_an_instance_id() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    result = await service.list_forums([7], 0, 100)
+
+    assert result["total_count"] == 1
+    assert result["items"][0]["forum_id"] is None
+    assert result["items"][0]["course_module_id"] == 19
+    assert result["items"][0]["can_create_discussions"] is None
+    assert result["items"][0]["capability_known"] is False
+    assert gateway.forms.calls == []
+
+
+async def test_session_course_state_rejects_unadvertised_courses_before_ajax() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    with pytest.raises(ValueError, match="no pertenece"):
+        await service.list_quizzes([999])
+
+    assert gateway.invoke_calls == []
+
+
+async def test_session_course_state_rejects_cross_module_activity_urls() -> None:
+    gateway = FakeSessionGateway()
+    gateway.course_state["cm"][1]["url"] = (
+        "https://cv.usc.es/mod/assign/view.php?id=18"
+    )
+    service = _service_with(gateway)
+
+    result = await service.list_quizzes([7])
+
+    assert result["quizzes"][0]["activity_url"] is None
+
+
+async def test_session_course_state_rejects_non_integer_course_ids() -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+
+    with pytest.raises(ValueError, match="entero positivo"):
+        await service.list_quizzes([7.5])  # type: ignore[list-item]
+
+    assert gateway.invoke_calls == []
+
+
+async def test_session_course_state_rejects_duplicate_course_modules() -> None:
+    gateway = FakeSessionGateway()
+    gateway.course_state["cm"].append(dict(gateway.course_state["cm"][0]))
+    service = _service_with(gateway)
+
+    with pytest.raises(CampusProtocolError, match="duplico un modulo"):
+        await service.list_quizzes([7])
+
+
+async def test_session_course_state_withholds_links_for_invisible_modules() -> None:
+    gateway = FakeSessionGateway()
+    gateway.course_state["cm"][1]["uservisible"] = False
+    service = _service_with(gateway)
+
+    result = await service.list_quizzes([7])
+
+    assert result["quizzes"][0]["visible"] is False
+    assert result["quizzes"][0]["activity_url"] is None
 
 
 async def test_submit_and_remove_previews_do_not_open_assignment_pages() -> None:

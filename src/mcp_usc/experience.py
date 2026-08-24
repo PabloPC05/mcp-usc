@@ -50,7 +50,7 @@ def compatibility_overview() -> dict[str, object]:
         "mcp": {
             "transport": "stdio",
             "sdk": "mcp-python 1.29.x",
-            "tools": 84,
+            "tools": 86,
             "resources": len(RESOURCE_URIS),
             "prompts": len(PROMPT_NAMES),
             "host_note": (
@@ -76,6 +76,7 @@ def compatibility_overview() -> dict[str, object]:
         "public_usc": {
             "authentication_required": False,
             "structured_centres": ["ETSE", "Facultade de Matemáticas"],
+            "degree_class_timetables": "Drupal público por grado, curso, semestre y semana.",
             "generic_sources": "Páginas o PDF HTTPS de dominios USC configurados explícitamente.",
         },
         "network_contacted": False,

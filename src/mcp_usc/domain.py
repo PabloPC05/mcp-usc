@@ -53,7 +53,7 @@ def normalise_event(event: dict[str, Any]) -> dict[str, Any]:
         "action_name": html_to_text(action.get("name")),
         "action_url": action.get("url"),
         "actionable": action.get("actionable"),
-        "time_left": html_to_text(event.get("timeusermidnight") or event.get("formattedtime")),
+        "time_left": html_to_text(event.get("formattedtime")),
         "content_is_untrusted": True,
     }
 

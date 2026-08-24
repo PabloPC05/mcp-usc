@@ -1,6 +1,6 @@
 # Inventario de herramientas MCP
 
-La versión 0.9.0 expone 84 herramientas. Este documento enumera el contrato público completo; el
+La versión 0.11.0 expone 91 herramientas. Este documento enumera el contrato público completo; el
 servidor también lo devuelve agrupado mediante `describe_mcp_usc` y un test lo compara con el
 inventario STDIO real.
 
@@ -29,7 +29,7 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `preview_student_action` | P | Previsualiza una acción genérica permitida y sus parámetros exactos. |
 | `execute_student_action` | E | Ejecuta la acción genérica aprobada; no es un proxy Moodle arbitrario. |
 
-## Perfil y progreso (9)
+## Perfil y progreso (13)
 
 | Herramienta | Tipo | Propósito |
 | --- | --- | --- |
@@ -39,6 +39,10 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `list_my_groups` | R | Grupos propios dentro de una materia. |
 | `get_my_grades` | R | Calificaciones propias globales o de una materia. |
 | `get_my_completion` | R | Estado de finalización propio. |
+| `preview_update_activity_completion_status_manually` | P | Comprueba curso, módulo y estado propio antes de marcar/desmarcar finalización manual. |
+| `update_activity_completion_status_manually` | E | Marca o desmarca la finalización manual del módulo propio confirmado. |
+| `preview_mark_course_self_completed` | P | Comprueba el criterio SELF explícito de Moodle antes de auto-completar un curso. |
+| `mark_course_self_completed` | E | Marca como completado el curso propio confirmado; no completa cursos ajenos. |
 | `list_notifications` | R | Notificaciones sin marcarlas como leídas. |
 | `list_my_badges` | R | Insignias visibles de la cuenta. |
 | `get_private_files_info` | R | Metadatos y cuota de archivos privados, sin descargar ni modificar. |
@@ -68,7 +72,7 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `search_message_contacts` | R | Busca destinatarios y crea una referencia temporal ligada al usuario. |
 | `preview_message` | P | Muestra destinatario y texto exactos; no envía. |
 | `send_message` | E | Envía el mensaje interno confirmado; puede activar avisos externos del destinatario. |
-| `list_forums` | R | Foros visibles de una materia. |
+| `list_forums` | R | Foros visibles; con sesión puede devolver solo CMID y metadatos básicos. |
 | `list_forum_discussions` | R | Discusiones visibles de un foro. |
 | `list_discussion_posts` | R | Compatibilidad; falla cerrado si Moodle puede marcar posts como leídos. |
 | `preview_inspect_discussion_posts` | P | Advierte del posible marcado de lectura antes de inspeccionar posts. |
@@ -82,16 +86,19 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `preview_cancel_choice_response` | P | Comprueba si se puede retirar la respuesta propia. |
 | `cancel_choice_response` | E | Retira la respuesta confirmada. Requiere REST anunciado. |
 
-## Materiales, grados y exámenes (11)
+## Materiales, grados, horarios y exámenes (14)
 
 | Herramienta | Tipo | Propósito |
 | --- | --- | --- |
 | `list_course_contents` | R | Secciones, actividades, páginas, enlaces y archivos de una materia. |
-| `list_course_resources` | R | Referencias opacas y temporales a recursos descargables. |
+| `list_course_resources` | R | Referencias descargables o metadatos CMID si la sesión no publica archivos. |
 | `read_course_resource` | R | Descarga y extrae texto de PDF, texto/HTML y OOXML con límites. |
 | `list_exam_sources` | R | Fuentes públicas configuradas para el buscador genérico. |
 | `search_exam_dates` | R | Busca evidencia de fechas en páginas/PDF USC configurados. |
 | `list_usc_degrees` | R | Titulaciones enlazadas por el catálogo oficial actual. |
+| `list_degree_timetables` | R | Descubre páginas de horario por centro, plan y curso desde una titulación oficial. |
+| `get_degree_class_timetable` | R | Resuelve la titulación elegida y agrega su semana lectiva oficial por centros. |
+| `get_my_class_timetable` | R | Usa el perfil académico local para consultar el horario sin repetir titulación, curso, plan ni grupos. |
 | `locate_usc_subject_codes` | R | Localiza códigos exactos en planes oficiales, con filtros opcionales. |
 | `list_official_exam_degrees` | R | Ediciones y crosswalks de calendarios estructurados admitidos. |
 | `list_official_exam_subjects` | R | Materias oficiales de un grado y curso académico. |
@@ -100,6 +107,22 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 
 Las fechas conservan `source_url`, curso académico, plan/centro y evidencia. Un conflicto se devuelve
 como conflicto: la herramienta no elige una fecha por parecido del nombre.
+
+`get_my_class_timetable` requiere un perfil local explícito mediante `USC_ACADEMIC_DEGREE_URL`
+y `USC_ACADEMIC_COURSE_NUMBER`, o un JSON indicado por `USC_ACADEMIC_PROFILE_FILE`. Puede
+incluir `USC_ACADEMIC_PROGRAM_ID`, `USC_ACADEMIC_GROUP_CODES`, `USC_ACADEMIC_YEAR`,
+`USC_ACADEMIC_SEMESTER` y `USC_ACADEMIC_DATE_IN_WEEK`; los contextos también se pueden
+proporcionar en la llamada. Si no se fija curso/semestre, se resuelve el curso académico y
+semestre a partir de la fecha local actual, con formato y rangos estrictos. El perfil es solo
+lectura local, se valida contra rutas oficiales USC y la respuesta conserva `program_id`,
+centros, `timetable_url` y endpoints de cada fuente.
+
+Los horarios lectivos conservan `timetable_url`, el endpoint semanal, `program_id`, centro y curso.
+`get_degree_class_timetable` exige `degree_url`, `course_number` y `academic_year`; acepta
+`semester`, `date_in_week`, `group_codes`, `subject_query` y `program_id`. Descubre y agrega los
+centros de la titulación seleccionada, manteniendo la procedencia de cada sesión. Si hay varios
+planes homónimos devuelve `status="program_selection_required"` y las opciones válidas; nunca elige
+uno por parecido. Una fuente sin datos conserva `status="no_data"`.
 
 ## Tareas y entregas (15)
 
@@ -149,11 +172,12 @@ elude.
 | Capacidad | Token REST | MoodleSession por HTTP |
 | --- | --- | --- |
 | Cursos, Timeline, mensajes y calendario | REST si el servicio expone la función | AJAX *same-origin* cuando Moodle la declara |
-| Recursos | REST + descarga autenticada | AJAX + `/pluginfile.php` directo |
+| Recursos | REST + descarga autenticada | Metadatos AJAX; descarga solo con `/pluginfile.php` directo |
 | Tareas | REST y upload multipart | Listado AJAX; formularios oficiales solo tras confirmar |
-| Cuestionarios | REST | Lecturas AJAX puras; formularios solo tras confirmar |
-| Eventos, foros y Choice contextuales | REST anunciado | Falla cerrado si no existe AJAX seguro |
-| Grados y exámenes públicos | No requiere autenticación | No requiere autenticación |
+| Cuestionarios | REST | Lista básica AJAX; formularios solo tras confirmar |
+| Foros | REST | Lista básica AJAX; discusiones requieren una función segura |
+| Eventos, Choice y finalización contextuales | REST anunciado | Falla cerrado si no existe AJAX seguro |
+| Grados, horarios y exámenes públicos | No requiere autenticación | No requiere autenticación |
 
 `list_student_capabilities(available_only=true)` muestra las funciones anunciadas por el servicio
 REST configurado. En modo sesión, Moodle no siempre publica un catálogo completo de disponibilidad;
@@ -161,7 +185,7 @@ cada llamada comprueba su contrato y falla cerrado.
 
 ## Catálogo genérico
 
-Además de estas 84 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
+Además de estas 91 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
 expresamente en una allowlist. `execute_student_action` admite 12 acciones genéricas acotadas. El
 [estudio de capacidades](student-capability-study.md) documenta las 301 funciones evaluadas, sus
 efectos y las diferencias entre versiones Moodle.

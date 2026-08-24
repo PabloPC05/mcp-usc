@@ -13,7 +13,7 @@ flowchart LR
     B --> C{Datos privados}
     C -->|Token legítimo| D[REST oficial Moodle]
     C -->|MoodleSession| E[AJAX same-origin\ny formularios confirmados]
-    B -->|HTTPS anónimo| F[Catálogo, planes y\ncalendarios oficiales USC]
+    B -->|HTTPS anónimo| F[Catálogo, planes, horarios y\ncalendarios oficiales USC]
     B -->|Solo login inicial opcional| G[Navegador visible\nMicrosoft/MFA]
     G -->|MoodleSession a keyring| B
 ```
@@ -25,8 +25,10 @@ flowchart LR
 | `server.py` | Declara las herramientas MCP y sus anotaciones de lectura/escritura. |
 | `service.py` | Orquesta permisos, transportes, confirmaciones y resultados normalizados. |
 | `campus.py` | Clientes HTTP REST y MoodleSession/AJAX. |
+| `session_course_state.py` | Listados básicos por CMID desde el estado AJAX puro de los cursos. |
 | `assignments.py`, `quizzes.py` | Contratos de tareas, archivos, formularios e intentos. |
 | `collaboration.py`, `contextual_actions.py` | Mensajes, foros, calendario y Choice. |
+| `class_timetables.py` | Descubrimiento multicentro y consulta semanal de horarios lectivos públicos. |
 | `official_exams.py`, `degree_catalog.py`, `study_plans.py` | Fuentes públicas de titulaciones, planes y fechas. |
 | `public_http_cache.py` | Caché anónima LRU, acotada y revalidada; nunca almacena datos privados. |
 | `confirmations.py` | Tokens en memoria, de un solo uso y ligados a usuario/parámetros. |
@@ -96,6 +98,6 @@ La caché solo sirve GET públicos anónimos que han superado validación estric
 ## Pruebas
 
 La suite reemplaza HTTP, keyring, formularios, subidas y descargas con dobles. El test STDIO arranca
-el servidor como lo haría un cliente real, enumera 84 herramientas, cuatro recursos y cuatro
+el servidor como lo haría un cliente real, enumera 91 herramientas, cuatro recursos y cuatro
 prompts, verifica las anotaciones y renderiza ejemplos por el protocolo real.
 La auditoría de la demo oficial de Moodle es opt-in, bloquea comunicaciones y no se ejecuta en CI.

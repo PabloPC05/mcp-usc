@@ -31,6 +31,12 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "finish_quiz",
         "execute_student_action",
         "get_my_completion",
+        "get_my_class_timetable",
+        "preview_update_activity_completion_status_manually",
+        "update_activity_completion_status_manually",
+        "preview_mark_course_self_completed",
+        "mark_course_self_completed",
+        "get_degree_class_timetable",
         "get_my_official_exam_schedule",
         "get_my_grades",
         "get_my_preferences",
@@ -56,6 +62,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "list_course_resources",
         "list_courses",
         "list_discussion_posts",
+        "list_degree_timetables",
         "list_exam_sources",
         "list_official_exam_degrees",
         "list_official_exam_subjects",
@@ -105,7 +112,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "submit_choice_response",
     }
     by_name = {tool.name: tool for tool in response.tools}
-    assert len(response.tools) == 84
+    assert len(response.tools) == 91
     documented_names = {
         name for group_names in CAPABILITY_TOOL_GROUPS.values() for name in group_names
     }
@@ -129,6 +136,8 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "submit_assignment",
         "submit_choice_response",
         "execute_student_action",
+        "update_activity_completion_status_manually",
+        "mark_course_self_completed",
     }
     preview_names = {
         "preview_cancel_choice_response",
@@ -149,6 +158,8 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "preview_start_quiz",
         "preview_submit_assignment",
         "preview_student_action",
+        "preview_update_activity_completion_status_manually",
+        "preview_mark_course_self_completed",
         "preview_submit_choice_response",
     }
     assert all(by_name[name].annotations.readOnlyHint is False for name in write_names)
@@ -198,7 +209,7 @@ async def test_stdio_server_advertises_and_renders_resources_and_prompts() -> No
         "prepare_assignment_submission",
     }
     about_payload = json.loads(about.contents[0].text)
-    assert about_payload["version"] == "0.9.0"
+    assert about_payload["version"] == "0.11.0"
     assert about_payload["network_contacted"] is False
     assert "14 días" in briefing.messages[0].content.text
     assert "No llames previews" in briefing.messages[0].content.text

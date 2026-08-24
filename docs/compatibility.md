@@ -5,7 +5,7 @@ Una función documentada puede no estar habilitada por la instalación o los per
 
 ## Runtime y sistemas operativos
 
-| Elemento | Contrato v0.9 | Verificación continua |
+| Elemento | Contrato v0.10 | Verificación continua |
 | --- | --- | --- |
 | Python | 3.11 o posterior | 3.11 y 3.13 |
 | Linux | Compatible | `ubuntu-latest` |
@@ -38,10 +38,11 @@ plugins, el servicio REST, el marcado AJAX y los permisos cambian por sitio.
 | --- | --- | --- |
 | Cursos, Timeline y calendario | Funciones del servicio | AJAX *same-origin* reconocido |
 | Mensajes y conversaciones | REST | AJAX puro cuando está disponible |
-| Recursos | REST + `/pluginfile.php` | AJAX + `/pluginfile.php` directo |
+| Recursos | REST + `/pluginfile.php` | Metadatos AJAX; descarga solo con `/pluginfile.php` directo |
 | Tareas | REST y upload multipart | Listado AJAX; formularios confirmados reconocidos |
-| Cuestionarios | REST | Lecturas AJAX; formularios confirmados para acciones |
-| Eventos, foros y Choice contextuales | REST anunciado | Falla cerrado sin AJAX seguro |
+| Cuestionarios | REST | Lista básica AJAX; formularios confirmados para acciones |
+| Foros | REST | Lista básica AJAX; discusiones fallan cerrado sin función segura |
+| Eventos y Choice contextuales | REST anunciado | Falla cerrado sin AJAX seguro |
 
 `list_student_capabilities(available_only=true)` descubre lo anunciado por un token. En modo sesión
 no existe siempre un catálogo fiable: cada llamada valida su propia disponibilidad y falla cerrado.
@@ -49,11 +50,15 @@ no existe siempre un catálogo fiable: cada llamada valida su propia disponibili
 ## Fuentes públicas USC
 
 - Catálogo y planes actuales: consulta HTTPS anónima con validación estricta.
+- Horarios lectivos: páginas Drupal públicas por titulación, centro, curso, semestre y semana.
 - Calendarios estructurados: ETSE y Facultade de Matemáticas para los crosswalks declarados.
 - Otros centros: búsqueda genérica solo en URLs USC configuradas y sus enlaces inmediatos.
 
-La localización global de una materia no implica que exista un calendario estructurado compatible
-para su centro. Toda fecha conserva fuente y curso académico; los conflictos no se silencian.
+La localización global de una materia no implica que exista un calendario de exámenes estructurado
+compatible para su centro. Los horarios de los centros pertenecientes al mismo plan se pueden
+agregar, pero cada sesión conserva su procedencia; los planes homónimos permanecen separados. Una
+ausencia de datos se devuelve explícitamente. Toda fecha conserva fuente y curso académico; los
+conflictos no se silencian.
 
 ## Qué significa “compatible”
 

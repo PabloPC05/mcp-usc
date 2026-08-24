@@ -7,6 +7,7 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
+from .academic_profile import AcademicProfile, load_academic_profile
 from .security import validate_usc_url
 
 
@@ -28,6 +29,7 @@ class Settings:
     public_cache_stale_if_error_seconds: float = 3_600.0
     public_cache_max_entries: int = 128
     public_cache_max_total_bytes: int = 64_000_000
+    academic_profile: AcademicProfile | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -85,4 +87,5 @@ class Settings:
             public_cache_stale_if_error_seconds=public_cache_stale_if_error_seconds,
             public_cache_max_entries=public_cache_max_entries,
             public_cache_max_total_bytes=public_cache_max_total_bytes,
+            academic_profile=load_academic_profile(),
         )

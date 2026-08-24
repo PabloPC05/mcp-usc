@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import mimetypes
 import secrets
 import time
@@ -9,6 +8,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .academic_profile import AcademicProfileError
+from .activity_actions import ActivityActionError
+from .activity_actions import (
+    mark_course_self_completed as moodle_mark_course_self_completed,
+)
+from .activity_actions import (
+    preview_mark_course_self_completed as moodle_preview_mark_course_self_completed,
+)
+from .activity_actions import (
+    preview_update_activity_completion_status_manually as moodle_preview_activity_completion,
+)
+from .activity_actions import (
+    update_activity_completion_status_manually as moodle_update_activity_completion,
+)
 from .assignments import (
     delete_submission_files as moodle_delete_submission_files,
 )
@@ -28,6 +41,7 @@ from .campus import (
     CampusProtocolError,
     create_campus_gateway,
 )
+from .class_timetables import UscClassTimetableClient
 from .collaboration import (
     list_conversation_messages as moodle_list_conversation_messages,
 )
@@ -100,6 +114,14 @@ from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
 from .resource_text import extract_resource_text
 from .security import html_to_text
+from .session_course_state import (
+    fetch_session_course_states,
+    session_assignments,
+    session_course_contents,
+    session_course_resources,
+    session_forums,
+    session_quizzes,
+)
 from .session_forms import FormUpload
 from .settings import Settings
 from .student_capabilities import (
@@ -245,69 +267,8 @@ def _capture_confirmed_uploads(
 async def _session_assignment_listing(
     gateway: Any, course_ids: list[int] | None
 ) -> dict[str, Any]:
-    courses = await gateway.list_courses(include_archived=True)
-    by_id = {
-        int(course["id"]): course
-        for course in courses
-        if isinstance(course, dict) and str(course.get("id") or "").isdigit()
-    }
-    ids = course_ids or list(by_id)
-    unique_ids: list[int] = []
-    for raw_id in ids:
-        if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id <= 0:
-            raise ValueError("course_id debe ser un entero positivo")
-        if raw_id not in unique_ids:
-            unique_ids.append(raw_id)
-    if len(unique_ids) > 100:
-        raise ValueError("No se pueden consultar mas de 100 cursos a la vez")
-    assignments: list[dict[str, Any]] = []
-    for course_id in unique_ids:
-        raw_state = await gateway.invoke("core_courseformat_get_state", {"courseid": course_id})
-        try:
-            state = json.loads(raw_state) if isinstance(raw_state, str) else raw_state
-        except json.JSONDecodeError as exc:
-            raise CampusProtocolError("Moodle devolvio un estado de curso no valido") from exc
-        if not isinstance(state, dict) or not isinstance(state.get("cm"), list):
-            raise CampusProtocolError("Moodle devolvio un estado de curso inesperado")
-        course = by_id.get(course_id, {})
-        for raw_module in state["cm"][:2_000]:
-            if not isinstance(raw_module, dict) or raw_module.get("module") != "assign":
-                continue
-            try:
-                cmid = int(raw_module.get("id") or 0)
-            except (TypeError, ValueError):
-                continue
-            if cmid <= 0:
-                continue
-            assignments.append(
-                {
-                    "id": None,
-                    "assignment_id": None,
-                    "cmid": cmid,
-                    "course_module_id": cmid,
-                    "name": html_to_text(str(raw_module.get("name") or ""), limit=1_000),
-                    "course_id": course_id,
-                    "course_name": html_to_text(
-                        str(course.get("fullname") or course.get("shortname") or ""), limit=1_000
-                    ),
-                    "visible": bool(raw_module.get("uservisible", True)),
-                    "instance_id_available": False,
-                    "transport": "moodle_ajax_course_state",
-                    "content_is_untrusted": True,
-                }
-            )
-    return {
-        "assignments": assignments,
-        "warnings": [
-            {
-                "code": "cmid_only",
-                "message": (
-                    "La sesion HTTP devuelve course_module_id (CMID), no el identificador "
-                    "interno de mod_assign."
-                ),
-            }
-        ],
-    }
+    states = await fetch_session_course_states(gateway, course_ids)
+    return session_assignments(states)
 
 
 def _identity_bound_payload(payload: dict[str, Any], user_id: int) -> dict[str, Any]:
@@ -621,6 +582,86 @@ class UscService:
             "course": sanitise_result(course_status),
             "content_is_untrusted": True,
         }
+
+    async def preview_update_activity_completion_status_manually(
+        self, course_id: int, cmid: int, completed: bool
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "core_webservice_get_site_info",
+            "core_course_get_course_module",
+            "core_completion_get_activities_completion_status",
+            "core_completion_update_activity_completion_status_manually",
+        )
+        request = {"course_id": course_id, "cmid": cmid, "completed": completed}
+        context = await moodle_preview_activity_completion(
+            gateway.invoke, **request
+        )
+        return await _contextual_confirmation(
+            gateway,
+            "contextual.update_activity_completion_status_manually",
+            request,
+            context,
+        )
+
+    async def update_activity_completion_status_manually(
+        self, course_id: int, cmid: int, completed: bool, confirmation_token: str
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {"course_id": course_id, "cmid": cmid, "completed": completed}
+        context = await moodle_preview_activity_completion(
+            gateway.invoke, **request
+        )
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.update_activity_completion_status_manually",
+            request,
+            context,
+        )
+        try:
+            return await moodle_update_activity_completion(
+                gateway.invoke, cmid=cmid, completed=completed
+            )
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ActivityActionError):
+            return _unknown_contextual_result("update_activity_completion_status_manually")
+
+    async def preview_mark_course_self_completed(self, course_id: int) -> dict[str, Any]:
+        gateway = self._campus()
+        await _require_functions(
+            gateway,
+            "core_webservice_get_site_info",
+            "core_completion_get_course_completion_status",
+            "core_completion_mark_course_self_completed",
+        )
+        request = {"course_id": course_id}
+        context = await moodle_preview_mark_course_self_completed(gateway.invoke, **request)
+        return await _contextual_confirmation(
+            gateway, "contextual.mark_course_self_completed", request, context
+        )
+
+    async def mark_course_self_completed(
+        self, course_id: int, confirmation_token: str
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        request = {"course_id": course_id}
+        context = await moodle_preview_mark_course_self_completed(gateway.invoke, **request)
+        await _consume_contextual_confirmation(
+            gateway,
+            confirmation_token,
+            "contextual.mark_course_self_completed",
+            request,
+            context,
+        )
+        try:
+            return await moodle_mark_course_self_completed(gateway.invoke, **request)
+        except (AuthenticationRequired, CampusCapabilityUnavailable):
+            raise
+        except (CampusError, ActivityActionError):
+            return _unknown_contextual_result("mark_course_self_completed")
 
     async def list_notifications(
         self, status: str = "unread", offset: int = 0, limit: int = 20
@@ -1069,8 +1110,8 @@ class UscService:
     ) -> list[dict[str, Any]]:
         if days < 1 or days > 366:
             raise ValueError("days debe estar entre 1 y 366")
-        if limit < 1 or limit > 200:
-            raise ValueError("limit debe estar entre 1 y 200")
+        if limit < 1 or limit > 50:
+            raise ValueError("limit debe estar entre 1 y 50")
         now = datetime.now(MADRID)
         start = 0 if include_overdue else int(now.timestamp())
         end = int((now + timedelta(days=days)).timestamp())
@@ -1144,6 +1185,87 @@ class UscService:
             "count": len(catalog.degrees),
             "cache": public_cache_summary(catalog.cache_metadata),
             "content_is_untrusted": True,
+        }
+
+    async def list_degree_timetables(
+        self, degree_url: str, course_number: int | None = None
+    ) -> dict[str, object]:
+        """Discover official course timetable pages advertised by a degree's centres."""
+
+        return await UscClassTimetableClient(
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        ).find_degree_timetables(degree_url, course_number=course_number)
+
+    async def get_degree_class_timetable(
+        self,
+        degree_url: str,
+        course_number: int,
+        academic_year: str,
+        semester: int = 1,
+        date_in_week: str | None = None,
+        group_codes: list[str] | None = None,
+        subject_query: str = "",
+        program_id: int | None = None,
+    ) -> dict[str, object]:
+        """Resolve one selected degree and aggregate its official centre timetables."""
+
+        return await UscClassTimetableClient(
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        ).fetch_degree_timetable(
+            degree_url,
+            course_number=course_number,
+            academic_year=academic_year,
+            semester=semester,
+            date_in_week=date_in_week,
+            group_codes=group_codes,
+            subject_query=subject_query,
+            program_id=program_id,
+        )
+
+    async def get_my_class_timetable(
+        self,
+        academic_year: str | None = None,
+        semester: int | None = None,
+        date_in_week: str | None = None,
+        subject_query: str = "",
+    ) -> dict[str, object]:
+        """Consulta el horario usando el perfil académico local explícito."""
+
+        profile = self.settings.academic_profile
+        if profile is None:
+            raise AcademicProfileError(
+                "No hay perfil académico local; configura USC_ACADEMIC_DEGREE_URL y "
+                "USC_ACADEMIC_COURSE_NUMBER (o USC_ACADEMIC_PROFILE_FILE)"
+            )
+        resolved_year, resolved_semester, resolved_date = profile.resolve(
+            academic_year=academic_year,
+            semester=semester,
+            date_in_week=date_in_week,
+        )
+        result = await UscClassTimetableClient(
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        ).fetch_degree_timetable(
+            profile.degree_url,
+            course_number=profile.course_number,
+            academic_year=resolved_year,
+            semester=resolved_semester,
+            date_in_week=resolved_date,
+            group_codes=profile.group_codes,
+            subject_query=subject_query,
+            program_id=profile.program_id,
+        )
+        return {
+            **result,
+            "profile": profile.public_dict(),
+            "profile_resolution": {
+                "academic_year": resolved_year,
+                "semester": resolved_semester,
+                "date_in_week": resolved_date,
+                "content_is_untrusted": False,
+            },
         }
 
     async def locate_usc_subject_codes(
@@ -1348,8 +1470,12 @@ class UscService:
     async def list_forums(
         self, course_ids: list[int] | None, offset: int, limit: int
     ) -> dict[str, Any]:
+        gateway = self._campus()
+        if _session_form_client(gateway) is not None:
+            states = await fetch_session_course_states(gateway, course_ids)
+            return session_forums(states, offset=offset, limit=limit)
         return await moodle_list_forums(
-            self._campus().invoke,
+            gateway.invoke,
             course_ids=course_ids or (),
             offset=offset,
             limit=limit,
@@ -1453,8 +1579,17 @@ class UscService:
         offset: int,
         limit: int,
     ) -> dict[str, Any]:
+        gateway = self._campus()
+        if _session_form_client(gateway) is not None:
+            states = await fetch_session_course_states(gateway, [course_id])
+            return session_course_contents(
+                states,
+                section_id=section_id,
+                offset=offset,
+                limit=limit,
+            )
         result = await moodle_list_course_contents(
-            self._campus().invoke,
+            gateway.invoke,
             course_id=course_id,
             section_id=section_id,
             offset=offset,
@@ -1469,8 +1604,17 @@ class UscService:
         offset: int,
         limit: int,
     ) -> dict[str, Any]:
+        gateway = self._campus()
+        if _session_form_client(gateway) is not None:
+            states = await fetch_session_course_states(gateway, [course_id])
+            return session_course_resources(
+                states,
+                section_id=section_id,
+                offset=offset,
+                limit=limit,
+            )
         result = await moodle_list_downloadable_resources(
-            self._campus().invoke,
+            gateway.invoke,
             course_id=course_id,
             section_id=section_id,
             offset=offset,
@@ -2389,7 +2533,11 @@ class UscService:
         return MoodleQuizClient(gateway.invoke)
 
     async def list_quizzes(self, course_ids: list[int] | None) -> dict[str, Any]:
-        return await self._quizzes().list_quizzes(course_ids)
+        gateway = self._campus()
+        if _session_form_client(gateway) is not None:
+            states = await fetch_session_course_states(gateway, course_ids)
+            return session_quizzes(states)
+        return await MoodleQuizClient(gateway.invoke).list_quizzes(course_ids)
 
     async def list_quiz_attempts(
         self,

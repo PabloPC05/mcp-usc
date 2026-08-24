@@ -1,17 +1,17 @@
 # Superficie MCP
 
-La versión 0.9 utiliza los tres bloques estándar del protocolo sin ampliar los permisos de la
+La versión 0.10 utiliza los tres bloques estándar del protocolo sin ampliar los permisos de la
 cuenta: herramientas, recursos y prompts. El transporte del servidor continúa siendo STDIO local.
 
 ## Resumen
 
 | Bloque | Cantidad | Control principal | Contacto con el Campus |
 | --- | ---: | --- | --- |
-| Herramientas | 84 | El modelo solicita la llamada; el host aplica aprobación | Según la herramienta |
+| Herramientas | 86 | El modelo solicita la llamada; el host aplica aprobación | Según la herramienta |
 | Recursos | 4 | El host o la persona los incorpora como contexto | Nunca; son estáticos y locales |
 | Prompts | 4 | La persona los selecciona explícitamente | No por sí mismos; guían herramientas |
 
-Que un host no muestre recursos o prompts no impide usar las 84 herramientas. Estas capacidades son
+Que un host no muestre recursos o prompts no impide usar las 91 herramientas. Estas capacidades son
 opcionales en las interfaces cliente y no sustituyen las confirmaciones de escritura.
 
 ## Recursos

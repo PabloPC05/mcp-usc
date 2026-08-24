@@ -8,8 +8,8 @@ académica propia con mínimo privilegio: consultar cursos, agenda, materiales, 
 calificaciones y progreso; y realizar únicamente cambios que el estudiante podría hacer en su
 propia cuenta y contexto.
 
-La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.9 expone
-84 herramientas (46 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
+La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.10 expone
+91 herramientas (49 lecturas puras, 21 previsualizaciones, 20 operaciones con efecto y una
 inspección potencialmente *stateful* confirmada), añade una descripción autoverificable del
 proyecto, descubrimiento público de titulaciones y materias, lecturas de alto nivel y un catálogo de
 301 funciones externas candidatas: 192 lecturas y 109 acciones. Ese catálogo es una lista blanca de
@@ -78,7 +78,7 @@ La versión 0.2 cubría cinco recorridos completos, además de autenticación y 
 | --- | --- | --- |
 | Campus y agenda | Cursos, Timeline, pendientes, eventos, detalle de evento y anuncios. | Ninguna. |
 | Mensajería y foros | Conversaciones, mensajes, contactos, foros y discusiones. La auditoría v0.3 reclasifica la lectura de posts como `R!`. | Envío de mensaje interno a un contacto resuelto recientemente. |
-| Materiales y exámenes | Secciones, actividades, archivos, extracción local de documentos y búsqueda en fuentes públicas oficiales. | Ninguna. |
+| Materiales, horarios y exámenes | Secciones, actividades, archivos, extracción local de documentos y consulta de fuentes públicas oficiales. | Ninguna. |
 | Tareas | Tareas, estado propio, texto online, archivos, feedback y posibilidad de reapertura. | Guardar texto, reemplazar o borrar archivos, enviar para calificación y retirar la entrega cuando Moodle lo permita. |
 | Cuestionarios | Cuestionarios, intentos, páginas y resumen. | Iniciar intento, guardar respuestas y finalizarlo. |
 
@@ -170,7 +170,7 @@ para una cuenta de estudiante y las que mejor ilustran los límites.
 | Marcar como leído | `R!` | `core_message_mark_message_read`, `core_message_mark_notification_read`, `core_message_mark_all_notifications_as_read`, `core_message_mark_all_conversation_messages_as_read` | Admitidas por genérico, pero tratadas como escritura. |
 | Bandera de pregunta | `W` | `core_question_update_flag` | Admitida por genérico para un intento propio; no cambia la respuesta. |
 | Registro de vistas | `R!` | `core_course_view_course`, `mod_assign_view_assign`, `mod_forum_view_forum_discussion`, `mod_h5pactivity_view_h5pactivity`, `mod_quiz_view_quiz`, `mod_workshop_view_workshop` | Catalogadas para descubrir semántica, pero no se ejecutan automáticamente al leer. |
-| Finalización manual | `W` | `core_completion_update_activity_completion_status_manually`, `core_completion_mark_course_self_completed` | Requiere herramienta contextual: puede activar reglas académicas. |
+| Finalización manual | `W` | `core_completion_update_activity_completion_status_manually`, `core_completion_mark_course_self_completed` | Cubiertas por herramientas contextuales: resuelven identidad, curso/módulo, estado propio y permiso explícito; pueden activar reglas académicas. |
 | Publicaciones | `W` | `mod_forum_add_discussion`, `mod_forum_add_discussion_post`, `core_comment_add_comments`, `mod_wiki_edit_page` | Requiere preview específico con curso, audiencia, contenido y autoría. |
 | Actividades evaluables | `W` | `mod_choice_submit_choice_response`, `mod_feedback_process_page`, `mod_lesson_process_page`, `mod_survey_submit_answers`, `mod_workshop_update_assessment` | Requiere flujo específico que compruebe fase, intento y consecuencias. |
 | Tareas y cuestionarios | `W` | `mod_assign_save_submission`, `mod_assign_submit_for_grading`, `mod_quiz_start_attempt`, `mod_quiz_process_attempt` | Ya cubiertas mediante herramientas específicas de v0.2, nunca por el genérico. |
@@ -208,9 +208,10 @@ preguntas. Incluso estas acciones siguen este protocolo:
 Las publicaciones, evaluaciones y operaciones destructivas necesitan información que un mapa JSON
 genérico no puede demostrar de forma suficiente: propietario, curso, grupo, destinatarios,
 visibilidad, fase, intento, archivos, plugins, declaración de autoría y reversibilidad. Por eso se
-rechazan antes de emitir el nonce. En v0.3 ya tienen herramienta contextual los eventos personales
-del calendario, las discusiones y respuestas públicas de foro sin adjuntos, y las respuestas propias
-de Choice. Estas seis operaciones requieren un token REST que anuncie sus funciones porque Moodle
+rechazan antes de emitir el nonce. Las herramientas contextuales cubren los eventos personales del
+calendario, las discusiones y respuestas públicas de foro sin adjuntos, las respuestas propias de
+Choice y, desde v0.11, la finalización manual de actividades y el criterio SELF de cursos. Estas
+ocho operaciones requieren un token REST que anuncie sus funciones porque Moodle
 4.5–5.2 no las expone normalmente por AJAX. Las restantes necesitan el mismo nivel de resolución
 antes de poder ejecutarse.
 
@@ -318,6 +319,18 @@ conector y una autorización independientes.
 Playwright se reserva al bootstrap visible del inicio de sesión. Las consultas y acciones usan HTTP
 REST, AJAX o formularios explícitos; no se automatiza la interfaz para sortear MFA, permisos,
 plugins, fases, límites o confirmaciones.
+
+## v0.11: finalizacion propia contextual
+
+Las herramientas `preview_update_activity_completion_status_manually` /
+`update_activity_completion_status_manually` exigen el modulo exacto, el curso coincidente, el modo
+`completion=manual` y el estado de finalizacion de la identidad autenticada. Las herramientas
+`preview_mark_course_self_completed` / `mark_course_self_completed` solo emiten nonce cuando el
+estado de curso contiene exactamente un criterio propio Moodle de tipo `SELF` (`type=1`) y dicho
+criterio no está completado. Ambas mutaciones envían una única llamada REST sin aceptar `userid` del
+cliente. Feedback, Survey, Lesson, Workshop, Wiki, Glossary y Database siguen fuera de esta capa
+hasta poder probar propietario, fase y esquema de respuesta con lecturas estables; publicaciones,
+evaluaciones y borrados no se habilitan en el generico.
 
 ## Consecuencia para el desarrollo
 

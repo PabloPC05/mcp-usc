@@ -47,7 +47,11 @@ async def _status() -> int:
     try:
         status = await UscService().auth_status()
     except CampusError as exc:
-        print(json.dumps({"authenticated": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        result: dict[str, object] = {"authenticated": False, "error": str(exc)}
+        diagnostic = getattr(exc, "as_dict", None)
+        if callable(diagnostic):
+            result["diagnostic"] = diagnostic()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0

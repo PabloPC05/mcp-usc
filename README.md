@@ -22,6 +22,7 @@ públicas de la USC, siempre con los permisos de tu propia cuenta.
 | Seguir una asignatura | «Resume los avisos recientes de AED y enséñame sus materiales.» |
 | Revisar entregas | «¿Qué archivos entregué y qué feedback recibí?» |
 | Preparar exámenes | «¿Cuándo son mis exámenes oficiales del curso 2026/2027?» |
+| Consultar horarios | «¿Qué clases tiene segundo del doble grado esta semana y en qué aulas?» |
 | Consultar actividad | «Enséñame mis notas, calendario, mensajes y progreso.» |
 | Actuar con aprobación | «Prepara esta entrega, pero no la envíes hasta que la confirme.» |
 
@@ -30,9 +31,9 @@ consulta correo ni Teams, no eleva privilegios y no actúa como profesorado o ad
 
 ## Estado del proyecto
 
-La versión **0.9.0** es una beta comunitaria: expone **84 herramientas MCP**, cuatro recursos
-pasivos y cuatro prompts guiados. Las herramientas se dividen en 46 lecturas puras, 19
-previsualizaciones, 18 operaciones con efecto y una inspección potencialmente stateful. El catálogo
+La versión **0.11.0** es una beta comunitaria: expone **91 herramientas MCP**, cuatro recursos
+pasivos y cuatro prompts guiados. Las herramientas se dividen en 49 lecturas puras, 21
+previsualizaciones, 20 operaciones con efecto y una inspección potencialmente stateful. El catálogo
 interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no significa
 que la USC o el token de cada persona habiliten todas ellas.
 
@@ -55,7 +56,7 @@ Para validar de verdad un token o una sesión mediante una lectura HTTP usa desp
 ## Documentación
 
 - [Primeros pasos](docs/getting-started.md): instalación, autenticación y conexión con un cliente.
-- [Inventario de herramientas](docs/tools.md): las 84 herramientas, tipos y requisitos.
+- [Inventario de herramientas](docs/tools.md): las 91 herramientas, tipos y requisitos.
 - [Superficie MCP](docs/mcp-surface.md): recursos, prompts y manifiesto local.
 - [Compatibilidad](docs/compatibility.md): sistemas, Python, hosts y transportes Moodle.
 - [Arquitectura](docs/architecture.md): transportes, componentes y fronteras de confianza.
@@ -189,15 +190,15 @@ Para borrar únicamente la copia local, sin enviar un cierre de sesión al Campu
 | --- | --- | --- |
 | Cursos, Timeline y calendario | API REST | AJAX; incluye cursos ocultos del tablero al solicitar archivados |
 | Conversaciones y mensajes | REST | AJAX |
-| Foros y discusiones | REST | AJAX cuando existe; sin fallback HTML |
+| Foros y discusiones | REST | Lista básica por estado AJAX; discusiones solo con función segura |
 | Posts de una discusión | REST con confirmación | AJAX con confirmación, si la función existe |
 | Publicar discusión/respuesta de foro | REST | No disponible de forma segura por AJAX |
 | Crear/borrar eventos personales | REST | No disponible de forma segura por AJAX |
 | Enviar/retirar respuesta Choice | REST | No disponible de forma segura por AJAX |
-| Materiales y recursos | REST | AJAX y descarga `/pluginfile.php` directa; nunca `view.php` |
+| Materiales y recursos | REST | Metadatos por estado AJAX; descarga solo con `/pluginfile.php` directo |
 | Lectura y modificación de tareas | REST | Listado AJAX puro; estado y cambios mediante formularios confirmados |
 | Archivos de entregas | REST + `/webservice/upload.php` multipart | Formularios non-JS de borrador y selector de archivos, tras confirmar |
-| Cuestionarios | REST | AJAX para lecturas puras; formulario solo tras confirmar acciones |
+| Cuestionarios | REST | Lista básica por estado AJAX; formulario solo tras confirmar acciones |
 
 En modo sesión no se ejecuta JavaScript ni se usa Playwright. Para los archivos se sigue el flujo
 non-JS que el propio Moodle publica: gestor de borradores, selector de repositorio y formulario
@@ -234,22 +235,26 @@ texto REST solo se habilita cuando `onlinetext` es el único complemento activo.
 los complementos en `mod_assign_save_submission`, por lo que una combinación desconocida se rechaza
 antes de crear un borrador o modificar la entrega.
 
-## Fuentes públicas de exámenes
+## Fuentes públicas de grados, horarios y exámenes
 
-El MCP integra por HTTP el catálogo de grados y los calendarios dinámicos oficiales de la ETSE y la
-Facultade de Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas seis
-herramientas:
+El MCP integra por HTTP el catálogo completo de grados y los horarios lectivos que sus centros
+enlazan, además de los calendarios dinámicos de exámenes compatibles de la ETSE y la Facultade de
+Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas ocho herramientas:
 
 - `list_usc_degrees`: lista las titulaciones enlazadas por el catálogo oficial actual;
 - `locate_usc_subject_codes`: localiza códigos exactos en los planes oficiales de un curso;
-
+- `list_degree_timetables`: parte de la página oficial de una titulación y encuentra sus páginas de
+  horario por centro, plan y curso;
+- `get_degree_class_timetable`: recibe la titulación seleccionada, el curso y el año académico;
+  resuelve y agrega sus centros y devuelve fechas, horas, materia, tipo de clase, grupo, aula y
+  URLs de procedencia;
 - `list_official_exam_degrees`: ediciones y crosswalks institucionales admitidos;
 - `list_official_exam_subjects`: descubre códigos, nombres y fichas para un curso académico;
 - `get_official_exam_dates`: convocatorias estructuradas para códigos y curso académico explícitos;
 - `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
   incluidos los ocultos del tablero.
 
-La versión 0.9 conserva la resolución específica del doble grado y la búsqueda independiente
+La versión 0.10 conserva la resolución específica del doble grado y la búsqueda independiente
 en todos los grados actuales. En la comprobación real de 2026/2027 se procesaron las 65 entradas del
 catálogo, incluidas materias repetidas por itinerarios y códigos oficiales con sufijo como
 `G3131324B`. Las repeticiones solo se fusionan si código y título coinciden exactamente, y se
@@ -270,6 +275,14 @@ ambas ediciones, se unifica solo cuando todas las convocatorias coinciden; si di
 `ambiguous`. Por ello `G1012106` se resuelve al plan actual `19955` y nunca toma las fechas del plan
 antiguo homónimo. El curso académico es obligatorio con formato `2025/2026`. Cada resultado conserva
 URL, endpoint, convocatoria, oportunidad, fecha, hora, aulas, grupos y evidencia por plan y centro.
+
+Los horarios lectivos se consultan por `degree_url`, `course_number`, curso académico, semestre y una
+fecha contenida en la semana. `get_degree_class_timetable` descubre y consulta automáticamente todos
+los centros de la titulación, pero conserva la procedencia de cada sesión. Si la USC publica varios
+planes homónimos que no se pueden distinguir desde la titulación, devuelve
+`status="program_selection_required"`; al repetir la consulta con uno de sus `program_id` no mezcla
+planes. También acepta `group_codes` y `subject_query`. Un centro que no publique datos queda como
+fuente `no_data`, sin sustituirlo por otra carrera parecida.
 
 Las respuestas públicas incluyen un resumen `cache` con frescura, aciertos y degradación. La caché
 local es LRU, acotada, se comparte durante la vida del proceso MCP únicamente entre GET públicos
@@ -327,7 +340,7 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.9.0 expone 84 herramientas: 46 lecturas puras, 19 previsualizaciones, 18 operaciones con
+La versión 0.11.0 expone 91 herramientas: 49 lecturas puras, 21 previsualizaciones, 20 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
 [inventario completo](docs/tools.md) y el
 [estudio de capacidades](docs/student-capability-study.md) explican las fronteras de seguridad y
@@ -339,7 +352,7 @@ las diferencias entre Moodle 4.5 y 5.2.
 | Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements`, `list_calendar_events` | crear o borrar un evento personal | crear o borrar un evento personal |
 | Mensajes y foros | `list_messages`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `search_message_contacts`; `list_discussion_posts` se conserva pero falla cerrado | mensaje, inspección de posts, nueva discusión o respuesta | enviar mensaje, inspeccionar posts, crear discusión o responder |
 | Choice | funciones de lectura del catálogo | enviar o retirar respuesta | enviar o retirar respuesta propia |
-| Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates`, `list_usc_degrees`, `locate_usc_subject_codes`, `list_official_exam_degrees`, `list_official_exam_subjects`, `get_official_exam_dates`, `get_my_official_exam_schedule` | — | — |
+| Materiales, horarios y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates`, `list_usc_degrees`, `list_degree_timetables`, `get_degree_class_timetable`, `locate_usc_subject_codes`, `list_official_exam_degrees`, `list_official_exam_subjects`, `get_official_exam_dates`, `get_my_official_exam_schedule` | — | — |
 | Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_inspect_submission_status`, `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `inspect_submission_status`, `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
 | Cuestionarios | `list_quizzes`, `list_quiz_attempts`, revisión final y mejor nota | inspeccionar intento activo, iniciar, guardar o finalizar | inspeccionar intento activo, iniciar, guardar o finalizar |
 
@@ -355,9 +368,11 @@ opciones antes de emitir confirmación:
 
 - crear o borrar eventos personales del calendario;
 - iniciar una discusión o responder públicamente en un foro, sin adjuntos ni respuesta privada;
-- enviar o retirar las respuestas propias de una actividad Choice.
+- enviar o retirar las respuestas propias de una actividad Choice;
+- marcar o desmarcar la finalización manual de una actividad propia;
+- marcar el criterio de auto-finalización de un curso cuando Moodle lo publica explícitamente.
 
-Estas seis acciones contextuales requieren que un token REST legítimo las anuncie. Moodle 4.5–5.2
+Estas ocho acciones contextuales requieren que un token REST legítimo las anuncie. Moodle 4.5–5.2
 no marca normalmente sus funciones como AJAX; el modo cookie se detiene antes de previsualizar y no
 intenta emularlas con navegador.
 
@@ -376,15 +391,19 @@ ejecutarlas ni implica que la USC tenga activo el módulo o plugin correspondien
   recorrer posts y metadatos de adjuntos.
 - `search_message_contacts` crea una referencia temporal al destinatario. `preview_message` exige
   una búsqueda reciente, muestra nombre, ID y texto, y nunca envía.
-- `list_course_contents` lista secciones, actividades, páginas, enlaces y archivos.
-- `list_course_resources` devuelve referencias opacas de diez minutos. Solo una referencia reciente
-  puede usarse con `read_course_resource`.
+- `list_course_contents` lista secciones, actividades, páginas, enlaces y archivos. Con sesión usa
+  el estado AJAX puro y marca `metadata_only=true`: no abre las páginas de los módulos.
+- `list_course_resources` devuelve referencias opacas de diez minutos cuando Moodle expone una URL
+  `/pluginfile.php`. Si la sesión solo publica módulos, los lista como metadatos no descargables,
+  con `resource_token=null`.
 - `read_course_resource` admite PDF, texto/HTML y OOXML (`.docx`, `.pptx`, `.xlsx`). De forma
   predeterminada limita la descarga a 25 MiB, el texto a 100 000 caracteres y los PDF a 100 páginas;
   los máximos aceptados por llamada son 50 MiB, 500 000 caracteres y 300 páginas.
-- En modo sesión, contenidos y anuncios exigen una función AJAX pura y los recursos deben apuntar
-  directamente a `/pluginfile.php`; abrir `course/view.php`, `mod/*/view.php` o páginas de foro se
-  rechaza porque puede registrar visitas, marcar lecturas o cambiar la finalización.
+- En modo sesión, contenidos, cuestionarios y foros se pueden descubrir mediante
+  `core_courseformat_get_state`. Solo se devuelve el CMID y metadatos limitados. Los recursos deben
+  apuntar directamente a `/pluginfile.php` para poder descargarse; abrir `course/view.php`,
+  `mod/*/view.php` o páginas de foro se rechaza porque puede registrar visitas, marcar lecturas o
+  cambiar la finalización.
 
 ### Tareas y entregas
 

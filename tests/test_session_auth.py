@@ -87,6 +87,33 @@ async def test_import_rejects_login_redirect_without_storing_cookie() -> None:
 
     assert not store.values
     assert cookie not in str(caught.value)
+    assert caught.value.code == "session_expired"
+    assert caught.value.action == "renew_session"
+
+
+@respx.mock
+async def test_import_rejects_login_html_with_http_200_without_storing_cookie() -> None:
+    cookie = "abcdef0123456789abcdef0123456789"
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(
+            200,
+            text="""
+              <form id='login' action='/login/index.php'>
+                <input name='username'><input name='password'>
+              </form>
+            """,
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+    )
+    store = MemoryStore()
+
+    with pytest.raises(SessionImportError) as caught:
+        await import_session_cookie(_settings(), cookie, credential_store=store)
+
+    assert caught.value.code == "session_expired"
+    assert caught.value.action == "renew_session"
+    assert not store.values
+    assert cookie not in str(caught.value)
 
 
 @respx.mock

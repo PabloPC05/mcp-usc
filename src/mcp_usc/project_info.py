@@ -5,10 +5,10 @@ from . import __version__
 PROJECT_URL = "https://github.com/PabloPC05/mcp-usc"
 
 TOOL_INVENTORY = {
-    "total": 84,
-    "read_only": 46,
-    "previews": 19,
-    "effects": 18,
+    "total": 91,
+    "read_only": 49,
+    "previews": 21,
+    "effects": 20,
     "stateful_reads": 1,
 }
 
@@ -42,6 +42,10 @@ CAPABILITY_TOOL_GROUPS = {
         "list_my_groups",
         "get_my_grades",
         "get_my_completion",
+        "preview_update_activity_completion_status_manually",
+        "update_activity_completion_status_manually",
+        "preview_mark_course_self_completed",
+        "mark_course_self_completed",
         "list_notifications",
         "list_my_badges",
         "get_private_files_info",
@@ -86,6 +90,9 @@ CAPABILITY_TOOL_GROUPS = {
         "list_exam_sources",
         "search_exam_dates",
         "list_usc_degrees",
+        "list_degree_timetables",
+        "get_degree_class_timetable",
+        "get_my_class_timetable",
         "locate_usc_subject_codes",
         "list_official_exam_degrees",
         "list_official_exam_subjects",
@@ -144,6 +151,8 @@ def project_overview() -> dict[str, object]:
             "¿Qué trabajos tengo pendientes esta semana?",
             "Resume los avisos recientes de mis asignaturas.",
             "¿Cuándo son mis exámenes oficiales de este curso?",
+            "¿Cuál es el horario oficial de segundo curso de mi grado esta semana?",
+            "Consulta mi horario de hoy usando mi perfil académico local.",
             "Enséñame el estado de una entrega sin modificarla.",
         ],
         "capability_groups": [
@@ -152,7 +161,7 @@ def project_overview() -> dict[str, object]:
             "materiales y recursos descargables",
             "tareas, borradores, archivos y entregas",
             "cuestionarios e intentos propios",
-            "grados, planes de estudio y exámenes oficiales USC",
+            "grados, planes de estudio, horarios lectivos y exámenes oficiales USC",
         ],
         "tool_groups": {name: list(tools) for name, tools in CAPABILITY_TOOL_GROUPS.items()},
         "tool_inventory": dict(TOOL_INVENTORY),

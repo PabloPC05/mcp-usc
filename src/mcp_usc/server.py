@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from functools import lru_cache
 
@@ -46,8 +47,22 @@ INSTRUCTIONS = (
     "nueva; nunca uses call_student_read con una función de seguimiento o escritura. "
     "La aceptación de políticas o consentimientos legales se realiza siempre manualmente en la "
     "web y no está autorizada por este MCP. "
-    "Al informar de exámenes cita source_url y advierte de conflictos o curso académico incierto."
+    "Al informar de exámenes cita source_url y advierte de conflictos o curso académico incierto. "
+    "Al informar de horarios conserva timetable_url, centro y program_id en cada sesión; puedes "
+    "agregar centros del mismo plan, pero nunca mezcles planes homónimos ni ocultes la procedencia."
+    " get_my_class_timetable solo usa el perfil académico local explícito y también es una "
+    "lectura pública; nunca modifica la matrícula ni el Campus."
 )
+
+
+def _configure_safe_http_logging() -> None:
+    """Prevent HTTP client loggers from printing credential-bearing URLs/headers."""
+
+    for logger_name in ("httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.CRITICAL + 1)
+
+
+_configure_safe_http_logging()
 
 mcp = FastMCP("USC Campus", instructions=INSTRUCTIONS, json_response=True)
 READ_ONLY = ToolAnnotations(
@@ -266,6 +281,38 @@ async def get_my_completion(course_id: int) -> dict:
     return await _service().get_my_completion(course_id)
 
 
+@mcp.tool(annotations=PREVIEW)
+async def preview_update_activity_completion_status_manually(
+    course_id: int, cmid: int, completed: bool
+) -> dict:
+    """Comprueba un módulo propio con finalización manual; no cambia su estado."""
+    return await _service().preview_update_activity_completion_status_manually(
+        course_id, cmid, completed
+    )
+
+
+@mcp.tool(annotations=WRITE)
+async def update_activity_completion_status_manually(
+    course_id: int, cmid: int, completed: bool, confirmation_token: str
+) -> dict:
+    """Marca o desmarca la finalización manual del módulo propio confirmado."""
+    return await _service().update_activity_completion_status_manually(
+        course_id, cmid, completed, confirmation_token
+    )
+
+
+@mcp.tool(annotations=PREVIEW)
+async def preview_mark_course_self_completed(course_id: int) -> dict:
+    """Comprueba si Moodle permite auto-completar el curso; no cambia el progreso."""
+    return await _service().preview_mark_course_self_completed(course_id)
+
+
+@mcp.tool(annotations=WRITE)
+async def mark_course_self_completed(course_id: int, confirmation_token: str) -> dict:
+    """Marca como completado el curso propio confirmado por Moodle y el usuario."""
+    return await _service().mark_course_self_completed(course_id, confirmation_token)
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def list_notifications(status: str = "unread", offset: int = 0, limit: int = 20) -> dict:
     """Lista notificaciones sin marcarlas como leídas ni vaciar la cola de sesión."""
@@ -467,7 +514,7 @@ async def list_pending_work(
     days: int = 60,
     include_overdue: bool = True,
     course_ids: list[int] | None = None,
-    limit: int = 100,
+    limit: int = 50,
 ) -> list[dict]:
     """Lista tareas, cuestionarios y acciones pendientes del Timeline de Moodle."""
     return await _service().list_events(
@@ -480,7 +527,7 @@ async def list_pending_work(
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_upcoming_events(
-    days: int = 60, course_ids: list[int] | None = None, limit: int = 100
+    days: int = 60, course_ids: list[int] | None = None, limit: int = 50
 ) -> list[dict]:
     """Lista próximos eventos accionables del calendario del Campus."""
     return await _service().list_events(
@@ -845,6 +892,57 @@ async def list_usc_degrees() -> dict:
 
 
 @mcp.tool(annotations=READ_ONLY)
+async def list_degree_timetables(
+    degree_url: str, course_number: int | None = None
+) -> dict:
+    """Descubre horarios oficiales por curso desde la página USC de una titulación."""
+
+    return await _service().list_degree_timetables(degree_url, course_number)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_degree_class_timetable(
+    degree_url: str,
+    course_number: int,
+    academic_year: str,
+    semester: int = 1,
+    date_in_week: str | None = None,
+    group_codes: list[str] | None = None,
+    subject_query: str = "",
+    program_id: int | None = None,
+) -> dict:
+    """Consulta el horario de la titulación elegida y agrega sus centros sin mezclar planes."""
+
+    return await _service().get_degree_class_timetable(
+        degree_url,
+        course_number,
+        academic_year,
+        semester,
+        date_in_week,
+        group_codes,
+        subject_query,
+        program_id,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_my_class_timetable(
+    academic_year: str | None = None,
+    semester: int | None = None,
+    date_in_week: str | None = None,
+    subject_query: str = "",
+) -> dict:
+    """Consulta el horario usando el perfil académico local, sin pedir sus identificadores."""
+
+    return await _service().get_my_class_timetable(
+        academic_year,
+        semester,
+        date_in_week,
+        subject_query,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
 async def locate_usc_subject_codes(
     subject_codes: list[str],
     academic_year: str,
@@ -1090,4 +1188,7 @@ async def finish_quiz(
 
 
 def run() -> None:
+    # FastMCP configures process logging when it starts. Keep explicit child
+    # logger levels so AJAX sesskeys and Cookie headers never reach stderr.
+    _configure_safe_http_logging()
     mcp.run(transport="stdio")

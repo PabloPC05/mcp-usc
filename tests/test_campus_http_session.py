@@ -76,6 +76,90 @@ def _session_context_html() -> str:
     """
 
 
+@pytest.fixture(params=("4.5", "5.0", "5.2"))
+def moodle_version_context(request: pytest.FixtureRequest) -> tuple[str, str]:
+    """Common authenticated header contract captured for supported Moodle lines.
+
+    The HTTP transport only relies on the stable preferences/sesskey/user-id contract here;
+    this fixture deliberately does not claim version-specific AJAX functions are available.
+    """
+
+    version = str(request.param)
+    return version, _session_context_html()
+
+
+def _login_page_html() -> str:
+    return """
+    <html><body>
+      <form id="login" action="/login/index.php" method="post">
+        <input name="username"><input name="password" type="password">
+      </form>
+    </body></html>
+    """
+
+
+@respx.mock
+async def test_session_status_detects_login_html_returned_with_http_200() -> None:
+    store = MemoryCredentialStore("expired-secret")
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(
+            200,
+            text=_login_page_html(),
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+    )
+
+    with pytest.raises(AuthenticationRequired) as caught:
+        await HttpSessionMoodleGateway(_settings(), store).status()  # type: ignore[arg-type]
+
+    assert caught.value.code == "session_expired"
+    assert caught.value.action == "renew_session"
+    assert "expired-secret" not in str(caught.value)
+
+
+@respx.mock
+async def test_session_ajax_detects_login_html_returned_with_http_200() -> None:
+    store = MemoryCredentialStore("expired-secret")
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=_session_context_html())
+    )
+    respx.post(
+        url__startswith="https://cv.usc.es/lib/ajax/service.php"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            text=_login_page_html(),
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+    )
+
+    gateway = HttpSessionMoodleGateway(_settings(), store)  # type: ignore[arg-type]
+    with pytest.raises(AuthenticationRequired) as caught:
+        await gateway.invoke("core_course_get_enrolled_courses_by_timeline_classification", {})
+
+    assert caught.value.code == "session_expired"
+    assert "expired-secret" not in str(caught.value)
+
+
+@respx.mock
+async def test_authenticated_header_contract_is_explicit_for_moodle_versions(
+    moodle_version_context: tuple[str, str],
+) -> None:
+    version, html = moodle_version_context
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(200, text=html)
+    )
+
+    result = await HttpSessionMoodleGateway(
+        _settings(), MemoryCredentialStore("session-secret")
+    ).status()  # type: ignore[arg-type]
+
+    assert result["authenticated"] is True
+    assert result["method"] == "moodle_http_session"
+    # Version is fixture metadata only: no unsupported version-specific behavior is asserted.
+    assert version in {"4.5", "5.0", "5.2"}
+
+
 async def test_session_rejects_rest_only_contextual_actions_before_any_http() -> None:
     gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
         _settings(), MemoryCredentialStore("session-secret")

@@ -34,6 +34,32 @@ _MAX_VALIDATION_HTML_BYTES = 5 * 1024 * 1024
 class SessionImportError(RuntimeError):
     """The supplied browser session could not be safely validated or stored."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session_import_failed",
+        action: str = "check_cookie_and_retry",
+    ) -> None:
+        # Stable, secret-free diagnostics make local renewal actionable without exposing the
+        # supplied cookie, sesskey, response body, or an exception cause.
+        folded = message.casefold()
+        if code == "session_import_failed":
+            if "caduc" in folded or "autoriz" in folded or "no corresponde" in folded:
+                code, action = "session_expired", "renew_session"
+            elif "formato" in folded:
+                code, action = "session_cookie_invalid", "copy_cookie_value_only"
+            elif "almac" in folded:
+                code, action = "credential_store_unavailable", "check_os_keyring"
+            elif "redir" in folded:
+                code, action = "session_redirect_unexpected", "retry_or_use_login"
+        super().__init__(message)
+        self.code = code
+        self.action = action
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "action": self.action, "message": str(self)}
+
 
 @dataclass(frozen=True, slots=True)
 class ImportedSession:

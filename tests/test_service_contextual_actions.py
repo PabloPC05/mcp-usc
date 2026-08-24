@@ -18,6 +18,8 @@ MUTATIONS = frozenset(
         "mod_forum_add_discussion_post",
         "mod_choice_submit_choice_response",
         "mod_choice_delete_choice_responses",
+        "core_completion_update_activity_completion_status_manually",
+        "core_completion_mark_course_self_completed",
     }
 )
 
@@ -119,6 +121,22 @@ CASES = (
         changed_arguments={"course_id": 6, "choice_id": 21},
         mutation="mod_choice_delete_choice_responses",
     ),
+    ActionCase(
+        name="update_activity_completion",
+        preview_method="preview_update_activity_completion_status_manually",
+        execute_method="update_activity_completion_status_manually",
+        arguments={"course_id": 7, "cmid": 31, "completed": True},
+        changed_arguments={"course_id": 7, "cmid": 31, "completed": False},
+        mutation="core_completion_update_activity_completion_status_manually",
+    ),
+    ActionCase(
+        name="mark_course_self_completed",
+        preview_method="preview_mark_course_self_completed",
+        execute_method="mark_course_self_completed",
+        arguments={"course_id": 7},
+        changed_arguments={"course_id": 8},
+        mutation="core_completion_mark_course_self_completed",
+    ),
 )
 
 
@@ -136,6 +154,10 @@ class FakeContextualGateway:
         self.choice_option_offset = 0
         self.choice_option_disabled = False
         self.choice_has_selection = True
+        self.activity_completion_mode = 1
+        self.activity_state = 0
+        self.self_completion_allowed = True
+        self.self_completion_title = "Auto-finalización"
         self.mutation_error = False
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.required: list[set[str]] = []
@@ -267,6 +289,41 @@ class FakeContextualGateway:
                 ],
                 "warnings": [],
             }
+        if function == "core_course_get_course_module":
+            return {
+                "cm": {
+                    "id": params["cmid"],
+                    "course": 7,
+                    "name": "Lectura inicial",
+                    "modname": "page",
+                    "completion": self.activity_completion_mode,
+                },
+                "warnings": [],
+            }
+        if function == "core_completion_get_activities_completion_status":
+            return {
+                "statuses": [{"cmid": 31, "state": self.activity_state}],
+                "warnings": [],
+            }
+        if function == "core_completion_get_course_completion_status":
+            return {
+                "completionstatus": {
+                    "completed": False,
+                    "aggregation": 1,
+                    "completions": (
+                        [
+                            {
+                                "type": 1,
+                                "title": self.self_completion_title,
+                                "complete": False,
+                            }
+                        ]
+                        if self.self_completion_allowed
+                        else []
+                    ),
+                },
+                "warnings": [],
+            }
         raise AssertionError(f"Lectura inesperada: {function} {params}")
 
     def _mutation_response(self, function: str) -> Any:
@@ -282,6 +339,10 @@ class FakeContextualGateway:
             return {"answers": [{"id": 70}], "warnings": []}
         if function == "mod_choice_delete_choice_responses":
             return {"status": True, "warnings": []}
+        if function == "core_completion_update_activity_completion_status_manually":
+            return {"status": True, "warnings": []}
+        if function == "core_completion_mark_course_self_completed":
+            return {"status": True, "warnings": []}
         raise AssertionError(function)
 
     def change_context(self, name: str) -> None:
@@ -295,6 +356,10 @@ class FakeContextualGateway:
             self.parent_subject = "Pregunta editada"
         elif name in {"submit_choice", "cancel_choice"}:
             self.choice_option_offset = 100
+        elif name == "update_activity_completion":
+            self.activity_state = 1
+        elif name == "mark_course_self_completed":
+            self.self_completion_title = "Auto-finalización actualizada"
         else:  # pragma: no cover - invariant of CASES
             raise AssertionError(name)
 
@@ -312,6 +377,10 @@ class FakeContextualGateway:
             self.choice_has_selection = False
         elif name == "cancel_choice":
             self.choice_has_selection = False
+        elif name == "update_activity_completion":
+            self.activity_completion_mode = 2
+        elif name == "mark_course_self_completed":
+            self.self_completion_allowed = False
         else:  # pragma: no cover - invariant of CASES
             raise AssertionError(name)
 
@@ -431,4 +500,18 @@ async def test_error_after_single_mutation_is_unknown_and_never_retried(case: Ac
     assert result["request_may_have_been_sent"] is True
     assert result["outcome"] == "unknown"
     assert result["do_not_retry"] is True
+    assert [function for function, _ in gateway.mutation_calls] == [case.mutation]
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
+async def test_confirmation_token_is_single_use(case: ActionCase) -> None:
+    gateway = FakeContextualGateway()
+    service = _service_with(gateway)
+    preview = await _preview(service, case)
+
+    await _execute(service, case, preview["confirmation_token"])
+
+    with pytest.raises(ValueError, match="Token de confirmación inválido"):
+        await _execute(service, case, preview["confirmation_token"])
+
     assert [function for function, _ in gateway.mutation_calls] == [case.mutation]

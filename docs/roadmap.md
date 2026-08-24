@@ -1,9 +1,11 @@
 # Hoja de ruta
 
-## Estado actual: 0.9.x
+## Estado actual: 0.11.x
 
-La serie 0.9 es una beta candidata a estabilización. Conserva el contrato de 84 herramientas y
-añade recursos, prompts, manifiesto determinista, CI multiplataforma y releases reproducibles. No se
+La serie 0.11 es una beta candidata a estabilización. Expone 91 herramientas e incorpora horarios
+lectivos oficiales por HTTP, perfil académico local, diagnóstico de sesión y finalización manual
+confirmada, además de recursos, prompts, manifiesto determinista y CI
+multiplataforma y releases reproducibles. No se
 denomina 1.0 porque todavía falta demostrar compatibilidad sostenida con más configuraciones reales
 de Moodle y completar una auditoría final sobre el contrato que vaya a declararse estable.
 
@@ -23,17 +25,22 @@ La versión 1.0 se publicará cuando se cumplan todos estos criterios:
 - proceso reproducible de release con artefactos, checksums y notas de migración;
 - al menos un ciclo de feedback comunitario sobre nombres, respuestas y ergonomía de herramientas.
 
-## Entregado en 0.9
+## Entregado hasta 0.11
 
 - matriz CI de Python 3.11/3.13 en Linux, Windows y macOS;
 - diagnóstico compacto y manifiesto sanitizado con digest del contrato;
 - recursos MCP pasivos y prompts guiados con límites explícitos;
 - documentación de compatibilidad y degradación para hosts MCP;
 - release automática con verificación de wheel y checksums SHA-256.
+- descubrimiento multicentro y consulta semanal de horarios lectivos oficiales, sin autenticación.
+- perfil académico local para resolver titulación, curso, plan y grupos sin repetir identificadores;
+- diagnóstico accionable de sesiones caducadas, incluso ante páginas de login con HTTP 200;
+- finalización manual de actividades y auto-finalización de curso con preview contextual y nonce.
 
 ## Prioridades antes de 1.0
 
-- fixtures versionados adicionales para respuestas diferenciales de Moodle 4.5, 5.0 y 5.2;
+- ampliar los fixtures versionados más allá del contrato común de sesión para respuestas
+  diferenciales de Moodle 4.5, 5.0 y 5.2;
 - validación de mínimo privilegio con más de una instalación/cuenta, sin persistir datos reales;
 - mayor cobertura de calendarios oficiales de otros centros USC cuando exista un vínculo verificable
   entre plan, código de materia y fuente de examen;
