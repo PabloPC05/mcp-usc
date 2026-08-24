@@ -46,7 +46,7 @@ class PublicUscClient:
     async def fetch(self, url: str) -> FetchedDocument:
         current = validate_usc_url(url)
         headers = {
-            "User-Agent": "mcp-usc/0.1 (+https://github.com/PabloPC05/mcp-usc)",
+            "User-Agent": "mcp-usc/0.4 (+https://github.com/PabloPC05/mcp-usc)",
             "Accept": "text/html,application/pdf;q=0.9,*/*;q=0.2",
         }
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:

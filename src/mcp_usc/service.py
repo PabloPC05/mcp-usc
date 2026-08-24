@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import mimetypes
 import secrets
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from .assignments import (
@@ -21,6 +24,7 @@ from .campus import (
     AuthenticationRequired,
     CampusCapabilityUnavailable,
     CampusError,
+    CampusMutationOutcomeUnknown,
     CampusProtocolError,
     create_campus_gateway,
 )
@@ -84,6 +88,7 @@ from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
 from .resource_text import extract_resource_text
 from .security import html_to_text
+from .session_forms import FormUpload
 from .settings import Settings
 from .student_capabilities import (
     GENERIC_ACTIONS,
@@ -182,6 +187,117 @@ def _require_rest_for_assignment(gateway: Any) -> None:
         )
 
 
+def _session_form_client(gateway: Any):
+    form_factory = getattr(gateway, "session_forms", None)
+    return form_factory() if form_factory is not None else None
+
+
+def _public_uploads(inspected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "relative_path": item["relative_path"],
+            "filename": item["filename"],
+            "size": item["size"],
+            "sha256": item["sha256"],
+        }
+        for item in inspected
+    ]
+
+
+def _capture_confirmed_uploads(
+    inspected: list[dict[str, Any]], max_total_bytes: int
+) -> list[FormUpload]:
+    """Read once and bind the exact bytes to the already-confirmed metadata."""
+
+    captured: list[FormUpload] = []
+    total = 0
+    for item in inspected:
+        path = Path(item["path"])
+        try:
+            with path.open("rb") as handle:
+                content = handle.read(max_total_bytes + 1)
+        except OSError as exc:
+            raise ValueError("Un archivo confirmado ya no se puede leer") from exc
+        total += len(content)
+        if total > max_total_bytes:
+            raise ValueError("Los archivos superan el limite de subida configurado")
+        if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != item["sha256"]:
+            raise ValueError(
+                "Un archivo cambio despues de la confirmacion; no se envio ningun contenido"
+            )
+        media_type = mimetypes.guess_type(item["filename"])[0] or "application/octet-stream"
+        captured.append(FormUpload(item["filename"], content, media_type))
+    return captured
+
+
+async def _session_assignment_listing(
+    gateway: Any, course_ids: list[int] | None
+) -> dict[str, Any]:
+    courses = await gateway.list_courses(include_archived=True)
+    by_id = {
+        int(course["id"]): course
+        for course in courses
+        if isinstance(course, dict) and str(course.get("id") or "").isdigit()
+    }
+    ids = course_ids or list(by_id)
+    unique_ids: list[int] = []
+    for raw_id in ids:
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id <= 0:
+            raise ValueError("course_id debe ser un entero positivo")
+        if raw_id not in unique_ids:
+            unique_ids.append(raw_id)
+    if len(unique_ids) > 100:
+        raise ValueError("No se pueden consultar mas de 100 cursos a la vez")
+    assignments: list[dict[str, Any]] = []
+    for course_id in unique_ids:
+        raw_state = await gateway.invoke("core_courseformat_get_state", {"courseid": course_id})
+        try:
+            state = json.loads(raw_state) if isinstance(raw_state, str) else raw_state
+        except json.JSONDecodeError as exc:
+            raise CampusProtocolError("Moodle devolvio un estado de curso no valido") from exc
+        if not isinstance(state, dict) or not isinstance(state.get("cm"), list):
+            raise CampusProtocolError("Moodle devolvio un estado de curso inesperado")
+        course = by_id.get(course_id, {})
+        for raw_module in state["cm"][:2_000]:
+            if not isinstance(raw_module, dict) or raw_module.get("module") != "assign":
+                continue
+            try:
+                cmid = int(raw_module.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cmid <= 0:
+                continue
+            assignments.append(
+                {
+                    "id": None,
+                    "assignment_id": None,
+                    "cmid": cmid,
+                    "course_module_id": cmid,
+                    "name": html_to_text(str(raw_module.get("name") or ""), limit=1_000),
+                    "course_id": course_id,
+                    "course_name": html_to_text(
+                        str(course.get("fullname") or course.get("shortname") or ""), limit=1_000
+                    ),
+                    "visible": bool(raw_module.get("uservisible", True)),
+                    "instance_id_available": False,
+                    "transport": "moodle_ajax_course_state",
+                    "content_is_untrusted": True,
+                }
+            )
+    return {
+        "assignments": assignments,
+        "warnings": [
+            {
+                "code": "cmid_only",
+                "message": (
+                    "La sesion HTTP devuelve course_module_id (CMID), no el identificador "
+                    "interno de mod_assign."
+                ),
+            }
+        ],
+    }
+
+
 def _identity_bound_payload(payload: dict[str, Any], user_id: int) -> dict[str, Any]:
     return {"authenticated_user_id": user_id, "parameters": payload}
 
@@ -258,6 +374,22 @@ def _unknown_contextual_result(action: str) -> dict[str, Any]:
             "comprueba su estado mediante una lectura antes de tomar otra decisión."
         ),
     }
+
+
+async def _session_form_mutation(action: str, operation: Any) -> dict[str, Any]:
+    try:
+        return await operation
+    except CampusMutationOutcomeUnknown:
+        return {
+            "request_may_have_been_sent": True,
+            "outcome": "unknown",
+            "do_not_retry": True,
+            "action": action,
+            "warning": (
+                "Moodle puede haber aplicado la operacion. No la repitas; inspecciona el "
+                "estado mediante el flujo confirmado antes de decidir."
+            ),
+        }
 
 
 class UscService:
@@ -1240,6 +1372,8 @@ class UscService:
 
     async def list_assignments(self, course_ids: list[int] | None) -> dict[str, Any]:
         gateway = self._campus()
+        if _session_form_client(gateway) is not None:
+            return await _session_assignment_listing(gateway, course_ids)
         await _require_functions(gateway, "mod_assign_get_assignments")
         return await moodle_list_assignments(gateway.invoke, course_ids)
 
@@ -1247,7 +1381,6 @@ class UscService:
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1260,15 +1393,10 @@ class UscService:
             forms = gateway.session_forms()
             if forms is None:
                 raise CampusProtocolError("El token REST requiere assignment_id.")
-            inspection = await forms.inspect_assignment(course_module_id)
-            return {
-                "assignment_id": None,
-                "course_module_id": course_module_id,
-                "transport": "moodle_http_form",
-                "editable": bool(inspection.get("save_supported")),
-                "inspection": inspection,
-                "content_is_untrusted": True,
-            }
+            raise CampusCapabilityUnavailable(
+                "La pagina de la tarea puede registrar vista/completion. Usa primero "
+                "preview_inspect_submission_status y luego inspect_submission_status."
+            )
         try:
             return await moodle_get_submission_status(gateway.invoke, assignment_id)
         except CampusCapabilityUnavailable as exc:
@@ -1288,6 +1416,56 @@ class UscService:
                 "content_is_untrusted": True,
             }
 
+    async def inspect_submission_status(
+        self,
+        course_module_id: int,
+        confirmation_token: str | None,
+    ) -> dict[str, Any]:
+        gateway = self._campus()
+        forms = _session_form_client(gateway)
+        if forms is None:
+            raise CampusCapabilityUnavailable(
+                "Esta inspeccion confirmada solo se usa con una sesion HTTP; con REST usa "
+                "get_submission_status."
+            )
+        payload = {"course_module_id": course_module_id}
+        if confirmation_token is None:
+            confirmation = await _issue_action_confirmation(
+                gateway, "assignment.inspect_status_stateful", payload
+            )
+            return {
+                "preview": True,
+                "course_module_id": course_module_id,
+                "stateful_read": True,
+                "warning": (
+                    "La vista previa no abre la tarea. La inspeccion confirmada abrira una vez "
+                    "la pagina de edicion y Moodle puede registrar vista o completion."
+                ),
+                **confirmation,
+            }
+        await _consume_action_confirmation(
+            gateway,
+            confirmation_token,
+            "assignment.inspect_status_stateful",
+            payload,
+        )
+        inspection_result = await _session_form_mutation(
+            "assignment.inspect_status_stateful",
+            forms.inspect_assignment(course_module_id),
+        )
+        if inspection_result.get("outcome") == "unknown":
+            return inspection_result
+        inspection = inspection_result
+        return {
+            "assignment_id": None,
+            "course_module_id": course_module_id,
+            "transport": "moodle_http_form",
+            "editable": bool(inspection.get("save_supported")),
+            "inspection": inspection,
+            "stateful_inspection_confirmed": True,
+            "content_is_untrusted": True,
+        }
+
     async def preview_save_online_submission(
         self,
         assignment_id: int | None,
@@ -1295,42 +1473,24 @@ class UscService:
         course_module_id: int | None = None,
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
             raise ValueError(
                 "En modo sesión usa assignment_id=null y el course_module_id mostrado por Moodle."
             )
-        if assignment_id is None:
+        if session_forms is not None:
             if course_module_id is None:
                 raise ValueError("Se requiere assignment_id o course_module_id")
-            forms = gateway.session_forms()
-            if forms is None:
-                raise CampusProtocolError("El token REST requiere assignment_id.")
-            inspection = await forms.inspect_assignment(course_module_id)
             status = {
-                "editable": bool(inspection.get("save_supported")),
+                "editable": True,
                 "transport": "moodle_http_form",
-                "inspection": inspection,
+                "unchecked_until_execution": True,
             }
         else:
-            try:
-                status = await moodle_get_submission_status(gateway.invoke, assignment_id)
-            except CampusCapabilityUnavailable as exc:
-                if course_module_id is None:
-                    raise CampusProtocolError(
-                        "Esta sesión necesita course_module_id para usar el formulario HTTP "
-                        "alternativo."
-                    ) from exc
-                inspection = await _session_forms_or_raise(gateway, exc).inspect_assignment(
-                    course_module_id
-                )
-                status = {
-                    "editable": bool(inspection.get("save_supported")),
-                    "transport": "moodle_http_form",
-                    "inspection": inspection,
-                }
+            if assignment_id is None:
+                raise ValueError("El token REST requiere assignment_id")
+            status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         if not status["editable"]:
             return {
                 "allowed": False,
@@ -1383,7 +1543,6 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1399,10 +1558,13 @@ class UscService:
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
         if form_client is not None and course_module_id is not None:
-            return await form_client.save_assignment(
-                course_module_id,
-                {"onlinetext_editor[text]": online_text},
-                confirmed=True,
+            return await _session_form_mutation(
+                "assignment.save_text",
+                form_client.save_assignment(
+                    course_module_id,
+                    {"onlinetext_editor[text]": online_text},
+                    confirmed=True,
+                ),
             )
         if assignment_id is None:
             if course_module_id is None:
@@ -1433,13 +1595,49 @@ class UscService:
 
     async def preview_replace_submission_files(
         self,
-        assignment_id: int,
+        assignment_id: int | None,
         file_paths: list[str],
         course_module_id: int | None = None,
     ) -> dict[str, Any]:
         inspected = inspect_upload_files(self.settings, file_paths)
+        public_files = _public_uploads(inspected)
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
+        session_forms = _session_form_client(gateway)
+        if session_forms is not None:
+            if assignment_id is not None:
+                raise ValueError(
+                    "En modo sesion usa assignment_id=null y course_module_id."
+                )
+            if course_module_id is None:
+                raise ValueError("Se requiere course_module_id en modo sesion")
+            payload = {
+                "assignment_id": None,
+                "course_module_id": course_module_id,
+                "files": public_files,
+            }
+            confirmation = await _issue_action_confirmation(
+                gateway, "assignment.replace_files", payload
+            )
+            return {
+                "allowed": True,
+                "replaced": False,
+                "assignment_id": None,
+                "course_module_id": course_module_id,
+                "files": public_files,
+                "total_bytes": sum(item["size"] for item in public_files),
+                "status": {
+                    "transport": "moodle_http_form",
+                    "unchecked_until_execution": True,
+                },
+                "warning": (
+                    "Tras confirmar, Moodle abrira un borrador temporal, eliminara sus archivos, "
+                    "subira los confirmados y guardara la entrega. Un fallo intermedio puede "
+                    "dejar el borrador parcial; nunca se reintenta automaticamente."
+                ),
+                **confirmation,
+            }
+        if assignment_id is None:
+            raise ValueError("El token REST requiere assignment_id")
         try:
             status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         except CampusCapabilityUnavailable as exc:
@@ -1467,15 +1665,6 @@ class UscService:
                     "subir archivos configura un token REST autorizado."
                 ),
             }
-        public_files = [
-            {
-                "relative_path": item["relative_path"],
-                "filename": item["filename"],
-                "size": item["size"],
-                "sha256": item["sha256"],
-            }
-            for item in inspected
-        ]
         if not status["editable"]:
             return {
                 "allowed": False,
@@ -1520,29 +1709,45 @@ class UscService:
 
     async def replace_submission_files(
         self,
-        assignment_id: int,
+        assignment_id: int | None,
         file_paths: list[str],
         confirmation_token: str,
+        course_module_id: int | None = None,
     ) -> dict[str, Any]:
         inspected = inspect_upload_files(self.settings, file_paths)
-        public_files = [
-            {
-                "relative_path": item["relative_path"],
-                "filename": item["filename"],
-                "size": item["size"],
-                "sha256": item["sha256"],
-            }
-            for item in inspected
-        ]
-        payload = {"assignment_id": assignment_id, "files": public_files}
+        public_files = _public_uploads(inspected)
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
+        form_client = _session_form_client(gateway)
+        if form_client is not None:
+            if assignment_id is not None:
+                raise ValueError("En modo sesion usa assignment_id=null")
+            if course_module_id is None:
+                raise ValueError("Se requiere course_module_id en modo sesion")
+            payload = {
+                "assignment_id": None,
+                "course_module_id": course_module_id,
+                "files": public_files,
+            }
+        else:
+            if assignment_id is None:
+                raise ValueError("El token REST requiere assignment_id")
+            payload = {"assignment_id": assignment_id, "files": public_files}
         await _consume_action_confirmation(
             gateway,
             confirmation_token,
             "assignment.replace_files",
             payload,
         )
+        if form_client is not None:
+            uploads = _capture_confirmed_uploads(inspected, self.settings.max_upload_bytes)
+            return await _session_form_mutation(
+                "assignment.replace_files",
+                form_client.replace_assignment_files(
+                    course_module_id,
+                    uploads,
+                    confirmed=True,
+                ),
+            )
         if self.settings.upload_root is None:
             raise ValueError("USC_UPLOAD_ROOT no está configurado")
         return await moodle_replace_submission_files(
@@ -1556,10 +1761,36 @@ class UscService:
         )
 
     async def preview_delete_submission_files(
-        self, assignment_id: int, course_module_id: int | None = None
+        self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
+        session_forms = _session_form_client(gateway)
+        if session_forms is not None:
+            if assignment_id is not None:
+                raise ValueError("En modo sesion usa assignment_id=null")
+            if course_module_id is None:
+                raise ValueError("Se requiere course_module_id en modo sesion")
+            payload = {"assignment_id": None, "course_module_id": course_module_id}
+            confirmation = await _issue_action_confirmation(
+                gateway, "assignment.delete_files", payload
+            )
+            return {
+                "allowed": True,
+                "deleted": False,
+                "assignment_id": None,
+                "course_module_id": course_module_id,
+                "status": {
+                    "transport": "moodle_http_form",
+                    "unchecked_until_execution": True,
+                },
+                "warning": (
+                    "Tras confirmar se eliminaran todos los archivos del borrador y se guardara "
+                    "la entrega conservando otros campos. Un fallo puede dejar el borrador parcial."
+                ),
+                **confirmation,
+            }
+        if assignment_id is None:
+            raise ValueError("El token REST requiere assignment_id")
         try:
             status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         except CampusCapabilityUnavailable as exc:
@@ -1612,17 +1843,37 @@ class UscService:
         }
 
     async def delete_submission_files(
-        self, assignment_id: int, confirmation_token: str
+        self,
+        assignment_id: int | None,
+        confirmation_token: str,
+        course_module_id: int | None = None,
     ) -> dict[str, Any]:
-        payload = {"assignment_id": assignment_id}
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
+        form_client = _session_form_client(gateway)
+        if form_client is not None:
+            if assignment_id is not None:
+                raise ValueError("En modo sesion usa assignment_id=null")
+            if course_module_id is None:
+                raise ValueError("Se requiere course_module_id en modo sesion")
+            payload = {"assignment_id": None, "course_module_id": course_module_id}
+        else:
+            if assignment_id is None:
+                raise ValueError("El token REST requiere assignment_id")
+            payload = {"assignment_id": assignment_id}
         await _consume_action_confirmation(
             gateway,
             confirmation_token,
             "assignment.delete_files",
             payload,
         )
+        if form_client is not None:
+            return await _session_form_mutation(
+                "assignment.delete_files",
+                form_client.delete_assignment_files(
+                    course_module_id,
+                    confirmed=True,
+                ),
+            )
         return await moodle_delete_submission_files(
             gateway.invoke,
             assignment_id,
@@ -1636,41 +1887,24 @@ class UscService:
         course_module_id: int | None = None,
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
             raise ValueError(
                 "En modo sesión usa assignment_id=null y el course_module_id mostrado por Moodle."
             )
-        if assignment_id is None:
+        if session_forms is not None:
             if course_module_id is None:
                 raise ValueError("Se requiere assignment_id o course_module_id")
-            forms = gateway.session_forms()
-            if forms is None:
-                raise CampusProtocolError("El token REST requiere assignment_id.")
-            inspection = await forms.prepare_assignment_submit(course_module_id)
             status = {
-                "can_submit": bool(inspection.get("supported")),
+                "can_submit": True,
                 "transport": "moodle_http_form",
-                "inspection": inspection,
+                "unchecked_until_execution": True,
             }
         else:
-            try:
-                status = await moodle_get_submission_status(gateway.invoke, assignment_id)
-            except CampusCapabilityUnavailable as exc:
-                if course_module_id is None:
-                    raise CampusProtocolError(
-                        "Esta sesión necesita course_module_id para preparar el formulario HTTP."
-                    ) from exc
-                inspection = await _session_forms_or_raise(gateway, exc).prepare_assignment_submit(
-                    course_module_id
-                )
-                status = {
-                    "can_submit": bool(inspection.get("supported")),
-                    "transport": "moodle_http_form",
-                    "inspection": inspection,
-                }
+            if assignment_id is None:
+                raise ValueError("El token REST requiere assignment_id")
+            status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         if not status["can_submit"]:
             return {
                 "allowed": False,
@@ -1714,7 +1948,6 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1730,10 +1963,13 @@ class UscService:
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
         if form_client is not None and course_module_id is not None:
-            return await form_client.submit_assignment(
-                course_module_id,
-                {"submissionstatement": accept_submission_statement},
-                confirmed=True,
+            return await _session_form_mutation(
+                "assignment.submit",
+                form_client.submit_assignment(
+                    course_module_id,
+                    {"submissionstatement": accept_submission_statement},
+                    confirmed=True,
+                ),
             )
         if assignment_id is None:
             if course_module_id is None:
@@ -1766,41 +2002,24 @@ class UscService:
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
             raise ValueError(
                 "En modo sesión usa assignment_id=null y el course_module_id mostrado por Moodle."
             )
-        if assignment_id is None:
+        if session_forms is not None:
             if course_module_id is None:
                 raise ValueError("Se requiere assignment_id o course_module_id")
-            forms = gateway.session_forms()
-            if forms is None:
-                raise CampusProtocolError("El token REST requiere assignment_id.")
-            inspection = await forms.inspect_assignment_delete(course_module_id)
             status = {
-                "editable": bool(inspection.get("delete_action_detected")),
+                "editable": True,
                 "transport": "moodle_http_form",
-                "inspection": inspection,
+                "unchecked_until_execution": True,
             }
         else:
-            try:
-                status = await moodle_get_submission_status(gateway.invoke, assignment_id)
-            except CampusCapabilityUnavailable as exc:
-                if course_module_id is None:
-                    raise CampusProtocolError(
-                        "Esta sesión necesita course_module_id para localizar el borrado HTTP."
-                    ) from exc
-                inspection = await _session_forms_or_raise(gateway, exc).inspect_assignment_delete(
-                    course_module_id
-                )
-                status = {
-                    "editable": bool(inspection.get("delete_action_detected")),
-                    "transport": "moodle_http_form",
-                    "inspection": inspection,
-                }
+            if assignment_id is None:
+                raise ValueError("El token REST requiere assignment_id")
+            status = await moodle_get_submission_status(gateway.invoke, assignment_id)
         if not status["editable"]:
             return {
                 "allowed": False,
@@ -1839,7 +2058,6 @@ class UscService:
             "course_module_id": course_module_id,
         }
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
         session_factory = getattr(gateway, "session_forms", None)
         session_forms = session_factory() if session_factory else None
         if session_forms is not None and assignment_id is not None:
@@ -1852,7 +2070,10 @@ class UscService:
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
         if form_client is not None and course_module_id is not None:
-            return await form_client.delete_assignment(course_module_id, confirmed=True)
+            return await _session_form_mutation(
+                "assignment.remove",
+                form_client.delete_assignment(course_module_id, confirmed=True),
+            )
         if assignment_id is None:
             if course_module_id is None:
                 raise ValueError("Se requiere course_module_id para eliminar por formulario HTTP")
@@ -1879,22 +2100,42 @@ class UscService:
         self, assignment_id: int | None, course_module_id: int | None = None
     ) -> dict[str, Any]:
         gateway = self._campus()
-        _require_rest_for_assignment(gateway)
+        if _session_form_client(gateway) is not None:
+            if assignment_id is not None:
+                raise ValueError("En modo sesion usa assignment_id=null")
+            if course_module_id is None:
+                raise ValueError("Se requiere course_module_id en modo sesion")
+            return {
+                "ok": False,
+                "supported": False,
+                "requires_stateful_inspection": True,
+                "mutated": False,
+                "assignment_id": None,
+                "course_module_id": course_module_id,
+                "transport": "moodle_http_form",
+                "warning": (
+                    "Usa preview_inspect_submission_status e inspect_submission_status para "
+                    "comprobar si Moodle expone de nuevo la edicion."
+                ),
+            }
         if assignment_id is None:
             if course_module_id is None:
                 raise ValueError("Se requiere assignment_id o course_module_id")
             forms = gateway.session_forms()
             if forms is None:
                 raise CampusProtocolError("El token REST requiere assignment_id.")
-            inspection = await forms.inspect_assignment(course_module_id)
             return {
-                "ok": bool(inspection.get("save_supported")),
-                "already_editable": bool(inspection.get("save_supported")),
+                "ok": False,
+                "supported": False,
+                "requires_stateful_inspection": True,
                 "mutated": False,
                 "assignment_id": None,
                 "course_module_id": course_module_id,
                 "transport": "moodle_http_form",
-                "inspection": inspection,
+                "warning": (
+                    "Comprobar reapertura abriria la tarea. Usa la inspeccion stateful confirmada "
+                    "para ver si el formulario de edicion esta disponible."
+                ),
             }
         try:
             return await moodle_reopen_submission(
@@ -2235,10 +2476,13 @@ class UscService:
             raise ValueError("El token REST requiere quiz_id")
         await _consume_action_confirmation(gateway, confirmation_token, "quiz.start", payload)
         if form_client is not None:
-            return await form_client.start_quiz(
-                course_module_id,
-                preflight_data,
-                confirmed=True,
+            return await _session_form_mutation(
+                "quiz.start",
+                form_client.start_quiz(
+                    course_module_id,
+                    preflight_data,
+                    confirmed=True,
+                ),
             )
         try:
             return await MoodleQuizClient(gateway.invoke).start_attempt(
@@ -2310,11 +2554,14 @@ class UscService:
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
         if form_client is not None:
-            return await form_client.save_quiz_page(
-                attempt_id,
-                page,
-                responses,
-                confirmed=True,
+            return await _session_form_mutation(
+                "quiz.save",
+                form_client.save_quiz_page(
+                    attempt_id,
+                    page,
+                    responses,
+                    confirmed=True,
+                ),
             )
         try:
             return await MoodleQuizClient(gateway.invoke).save_answers(
@@ -2391,7 +2638,10 @@ class UscService:
                     "preflight_data o time_up. No se finalizó el intento: guarda primero las "
                     "respuestas mediante su flujo confirmado."
                 )
-            return await form_client.finish_quiz(attempt_id, confirmed=True)
+            return await _session_form_mutation(
+                "quiz.finish",
+                form_client.finish_quiz(attempt_id, confirmed=True),
+            )
         try:
             return await MoodleQuizClient(gateway.invoke).finish_attempt(
                 attempt_id,

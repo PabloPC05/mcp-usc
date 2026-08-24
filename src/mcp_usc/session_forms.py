@@ -32,6 +32,15 @@ class FormResponse:
     status_code: int = 200
 
 
+@dataclass(frozen=True, slots=True)
+class FormUpload:
+    """An already-verified in-memory upload; neither bytes nor name appear in repr."""
+
+    filename: str = field(repr=False)
+    content: bytes = field(repr=False)
+    content_type: str = "application/octet-stream"
+
+
 GetForm = Callable[[str, Mapping[str, Any]], Awaitable[FormResponse]]
 PostForm = Callable[[str, Mapping[str, str]], Awaitable[FormResponse]]
 PostMultipart = Callable[[str, Mapping[str, str], Mapping[str, Any]], Awaitable[FormResponse]]
@@ -48,7 +57,10 @@ _FIELD_NAME = re.compile(r"[A-Za-z0-9_.:\-\[\]]{1,256}\Z")
 _SENSITIVE_NAMES = frozenset({"access_token", "apikey", "password", "sesskey", "token", "wstoken"})
 _MAX_FIELDS = 600
 _MAX_PAYLOAD_BYTES = 2_000_000
+_MAX_REPOSITORIES = 30
 _ASSIGN_PATH = "/mod/assign/view.php"
+_DRAFT_MANAGER_PATH = "/repository/draftfiles_manager.php"
+_FILE_PICKER_PATH = "/repository/filepicker.php"
 _QUIZ_START_PATH = "/mod/quiz/startattempt.php"
 _QUIZ_PROCESS_PATH = "/mod/quiz/processattempt.php"
 
@@ -63,7 +75,7 @@ class SessionFormConfirmationRequired(PermissionError):
 
 @dataclass(slots=True)
 class _ParsedForm:
-    action: str
+    action: str = field(repr=False)
     action_path: str
     method: str
     enctype: str
@@ -71,8 +83,8 @@ class _ParsedForm:
     visible_fields: frozenset[str]
     required_fields: frozenset[str]
     file_fields: frozenset[str]
-    buttons: dict[str, str]
-    choices: dict[str, list[dict[str, str]]]
+    buttons: dict[str, str] = field(repr=False)
+    choices: dict[str, list[dict[str, str]]] = field(repr=False)
 
 
 def _positive_id(value: int, name: str) -> int:
@@ -131,6 +143,22 @@ def _performed(operation: str, response: FormResponse) -> dict[str, Any]:
         "result_text": html_to_text(response.text, limit=2_000),
         "result_is_untrusted": True,
         "server_confirmation_unknown": True,
+        "security_note": SECURITY_NOTE,
+    }
+
+
+def _partial_draft(operation: str, message: str) -> dict[str, Any]:
+    """Conservative result after one or more draft-area mutations."""
+
+    return {
+        "operation": operation,
+        "request_sent": True,
+        "outcome": "unknown",
+        "supported": True,
+        "draft_may_be_partial": True,
+        "submission_saved": False,
+        "do_not_retry": True,
+        "reason": message,
         "security_note": SECURITY_NOTE,
     }
 
@@ -263,7 +291,9 @@ class MoodleSessionForms:
 
     @staticmethod
     def _has_sesskey(form: _ParsedForm) -> bool:
-        return bool(_SESSKEY.fullmatch(form.defaults.get("sesskey", "")))
+        query = parse_qs(urlparse(form.action).query)
+        value = form.defaults.get("sesskey") or (query.get("sesskey") or [""])[0]
+        return bool(_SESSKEY.fullmatch(value))
 
     @staticmethod
     def _bound(form: _ParsedForm, expected: int, *names: str) -> bool:
@@ -317,6 +347,153 @@ class MoodleSessionForms:
                 return candidate
         return None
 
+    def _assignment_save_form(
+        self, response: FormResponse, course_module_id: int
+    ) -> _ParsedForm | None:
+        return next(
+            (
+                item
+                for item in self._forms(response, frozenset({_ASSIGN_PATH}))
+                if item.defaults.get("action") == "savesubmission"
+                and self._bound(item, course_module_id, "id")
+                and item.method == "post"
+                and self._has_sesskey(item)
+            ),
+            None,
+        )
+
+    def _bound_link(
+        self,
+        response: FormResponse,
+        path: str,
+        *,
+        item_id: int,
+        action: str | None = None,
+    ) -> list[str]:
+        links: list[str] = []
+        soup = BeautifulSoup(response.text, "html.parser")
+        for anchor in soup.select("a[href]")[:500]:
+            try:
+                candidate = self._safe_action(
+                    str(anchor.get("href") or ""), response.url, frozenset({path})
+                )
+            except SessionFormValidationError:
+                continue
+            query = parse_qs(urlparse(candidate).query)
+            if query.get("itemid") != [str(item_id)]:
+                continue
+            if action is not None and query.get("action") != [action]:
+                continue
+            if not _SESSKEY.fullmatch((query.get("sesskey") or [""])[0]):
+                continue
+            links.append(candidate)
+        return links
+
+    def _draft_context(
+        self, response: FormResponse, course_module_id: int
+    ) -> tuple[_ParsedForm, int, str] | None:
+        form = self._assignment_save_form(response, course_module_id)
+        if form is None:
+            return None
+        raw_item_id = form.defaults.get("files_filemanager", "")
+        if not raw_item_id.isdigit() or int(raw_item_id) <= 0:
+            return None
+        item_id = int(raw_item_id)
+        manager_links = self._bound_link(
+            response, _DRAFT_MANAGER_PATH, item_id=item_id, action="browse"
+        )
+        if len(manager_links) != 1:
+            return None
+        return form, item_id, manager_links[0]
+
+    def _draft_files(self, response: FormResponse, item_id: int) -> list[dict[str, str]]:
+        files: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for candidate in self._bound_link(
+            response, _DRAFT_MANAGER_PATH, item_id=item_id, action="deletedraft"
+        ):
+            query = parse_qs(urlparse(candidate).query)
+            filename = (query.get("filename") or [""])[0]
+            filepath = (query.get("filepath") or [""])[0]
+            if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
+                continue
+            identity = (filepath, filename)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            files.append(
+                {
+                    "filename": filename[:255],
+                    "filepath": filepath[:1_000],
+                    "delete_url": candidate,
+                }
+            )
+        return files
+
+    async def _discover_upload_form(
+        self, manager_response: FormResponse, item_id: int
+    ) -> _ParsedForm | None:
+        plugin_links = self._bound_link(
+            manager_response, _FILE_PICKER_PATH, item_id=item_id, action="plugins"
+        )
+        if len(plugin_links) != 1:
+            return None
+        plugins = await self._get(plugin_links[0], {})
+        repository_links = self._bound_link(
+            plugins, _FILE_PICKER_PATH, item_id=item_id, action="list"
+        )
+        for link in repository_links[:_MAX_REPOSITORIES]:
+            repository = await self._get(link, {})
+            for form in self._forms(repository, frozenset({_FILE_PICKER_PATH})):
+                action_query = parse_qs(urlparse(form.action).query)
+                if (
+                    form.method == "post"
+                    and "multipart/form-data" in form.enctype
+                    and form.defaults.get("action") == "upload"
+                    and (
+                        form.defaults.get("itemid") == str(item_id)
+                        or action_query.get("itemid") == [str(item_id)]
+                    )
+                    and "repo_upload_file" in form.file_fields
+                    and self._has_sesskey(form)
+                ):
+                    return form
+        return None
+
+    @staticmethod
+    def _validated_uploads(uploads: list[FormUpload]) -> list[FormUpload]:
+        if not isinstance(uploads, list) or len(uploads) > 20:
+            raise SessionFormValidationError("Se admiten como maximo 20 archivos")
+        validated: list[FormUpload] = []
+        names: set[str] = set()
+        total = 0
+        for upload in uploads:
+            if not isinstance(upload, FormUpload):
+                raise SessionFormValidationError("Los archivos deben estar verificados en memoria")
+            name = upload.filename
+            if (
+                not name
+                or len(name) > 255
+                or name in {".", ".."}
+                or any(char in name for char in ("/", "\\", "\0"))
+                or any(ord(char) < 32 or ord(char) == 127 for char in name)
+            ):
+                raise SessionFormValidationError("Nombre de archivo no valido")
+            if name.casefold() in names:
+                raise SessionFormValidationError("Los nombres de archivo deben ser unicos")
+            if not isinstance(upload.content, bytes):
+                raise SessionFormValidationError("El contenido del archivo debe estar en memoria")
+            if not upload.content_type or any(
+                ord(char) < 32 or ord(char) == 127 for char in upload.content_type
+            ):
+                raise SessionFormValidationError("Tipo MIME no valido")
+            total += len(upload.content)
+            if total > 100 * 1024 * 1024:
+                raise SessionFormValidationError("Los archivos superan el limite seguro")
+            names.add(name.casefold())
+            validated.append(upload)
+        return validated
+
     @staticmethod
     def _payload(
         form: _ParsedForm,
@@ -344,7 +521,11 @@ class MoodleSessionForms:
             if button not in form.buttons:
                 return None, f"El formulario no expone el boton requerido {button}"
             payload[button] = form.buttons[button]
-        missing = [name for name in form.required_fields if not payload.get(name)]
+        missing = [
+            name
+            for name in form.required_fields
+            if name not in form.file_fields and not payload.get(name)
+        ]
         if missing:
             return None, "Faltan campos obligatorios: " + ", ".join(sorted(missing)[:20])
         if len(payload) > _MAX_FIELDS:
@@ -361,23 +542,186 @@ class MoodleSessionForms:
             {"id": course_module_id, "action": "editsubmission"},
         )
         forms = self._forms(response, frozenset({_ASSIGN_PATH}))
-        save_supported = any(
-            form.defaults.get("action") == "savesubmission"
-            and self._bound(form, course_module_id, "id")
-            and form.method == "post"
-            and self._has_sesskey(form)
-            for form in forms
-        )
+        save_supported = self._assignment_save_form(response, course_module_id) is not None
+        draft = self._draft_context(response, course_module_id)
+        filemanager: dict[str, Any] = {
+            "supported": False,
+            "current_files": [],
+        }
+        if draft is not None:
+            _, item_id, manager_url = draft
+            manager = await self._get(manager_url, {})
+            current_files = self._draft_files(manager, item_id)
+            filemanager = {
+                "supported": True,
+                "draft_item_id_present": True,
+                "current_files": [
+                    {"filename": item["filename"], "filepath": item["filepath"]}
+                    for item in current_files
+                ],
+                "file_count": len(current_files),
+            }
         return {
             "operation": "inspect_assignment",
             "course_module_id": course_module_id,
             "forms": [self._summary(form) for form in forms],
             "save_supported": save_supported,
+            "filemanager": filemanager,
             "delete_action_detected": bool(self._assignment_delete_url(response, course_module_id)),
             "page_text": html_to_text(response.text, limit=4_000),
             "content_is_untrusted": True,
             "security_note": SECURITY_NOTE,
         }
+
+    async def replace_assignment_files(
+        self,
+        course_module_id: int,
+        uploads: list[FormUpload],
+        *,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        """Replace the assignment draft files through Moodle's non-JS file manager."""
+
+        course_module_id = _positive_id(course_module_id, "course_module_id")
+        _confirmed(confirmed, "Reemplazar los archivos de la entrega")
+        uploads = self._validated_uploads(uploads)
+        if not uploads:
+            return _diagnostic(
+                "replace_assignment_files",
+                "files_required",
+                "Para reemplazar archivos debe indicarse al menos uno",
+            )
+        edit = await self._get(
+            f"{self.base_url}{_ASSIGN_PATH}",
+            {"id": course_module_id, "action": "editsubmission"},
+        )
+        context = self._draft_context(edit, course_module_id)
+        if context is None:
+            return _diagnostic(
+                "replace_assignment_files",
+                "safe_filemanager_not_found",
+                "Moodle no expuso el gestor no-JavaScript ligado a este borrador",
+            )
+        save_form, item_id, manager_url = context
+        manager = await self._get(manager_url, {})
+        current_files = self._draft_files(manager, item_id)
+        upload_form = await self._discover_upload_form(manager, item_id)
+        if upload_form is None:
+            return _diagnostic(
+                "replace_assignment_files",
+                "upload_repository_not_found",
+                "Moodle no expuso un repositorio de subida no-JavaScript seguro",
+            )
+
+        mutations = 0
+        try:
+            for item in current_files:
+                mutations += 1
+                await self._get(item["delete_url"], {})
+            for index, upload in enumerate(uploads):
+                if index:
+                    manager = await self._get(manager_url, {})
+                    upload_form = await self._discover_upload_form(manager, item_id)
+                    if upload_form is None:
+                        return _partial_draft(
+                            "replace_assignment_files",
+                            "Moodle dejo de exponer el repositorio durante la operacion",
+                        )
+                values = {"title": upload.filename} if "title" in upload_form.visible_fields else {}
+                payload, error = self._payload(upload_form, values)
+                if error or payload is None:
+                    if mutations:
+                        return _partial_draft(
+                            "replace_assignment_files",
+                            "El formulario de subida cambio durante la operacion",
+                        )
+                    return _diagnostic(
+                        "replace_assignment_files",
+                        "unsafe_upload_form",
+                        error or "El formulario de subida no es valido",
+                    )
+                mutations += 1
+                await self._post_multipart(
+                    upload_form.action,
+                    payload,
+                    {"repo_upload_file": upload},
+                )
+            save_payload, error = self._payload(save_form, {})
+            if error or save_payload is None:
+                return _partial_draft(
+                    "replace_assignment_files",
+                    "El formulario de guardado no se pudo reconstruir con seguridad",
+                )
+            saved = await self._post(save_form.action, save_payload)
+        except Exception:
+            if mutations:
+                return _partial_draft(
+                    "replace_assignment_files",
+                    "Fallo de transporte tras modificar el area de borrador; no reintentar",
+                )
+            raise
+        result = _performed("replace_assignment_files", saved)
+        result.update(
+            {
+                "draft_mutations": mutations,
+                "uploaded_files": [upload.filename for upload in uploads],
+                "do_not_retry": True,
+            }
+        )
+        return result
+
+    async def delete_assignment_files(
+        self, course_module_id: int, *, confirmed: bool
+    ) -> dict[str, Any]:
+        """Remove all draft files and save the assignment form, preserving other plugins."""
+
+        course_module_id = _positive_id(course_module_id, "course_module_id")
+        _confirmed(confirmed, "Eliminar los archivos de la entrega")
+        edit = await self._get(
+            f"{self.base_url}{_ASSIGN_PATH}",
+            {"id": course_module_id, "action": "editsubmission"},
+        )
+        context = self._draft_context(edit, course_module_id)
+        if context is None:
+            return _diagnostic(
+                "delete_assignment_files",
+                "safe_filemanager_not_found",
+                "Moodle no expuso el gestor no-JavaScript ligado a este borrador",
+            )
+        save_form, item_id, manager_url = context
+        manager = await self._get(manager_url, {})
+        current_files = self._draft_files(manager, item_id)
+        if not current_files:
+            return {
+                "operation": "delete_assignment_files",
+                "performed": False,
+                "supported": True,
+                "already_empty": True,
+                "course_module_id": course_module_id,
+                "security_note": SECURITY_NOTE,
+            }
+        mutations = 0
+        try:
+            for item in current_files:
+                mutations += 1
+                await self._get(item["delete_url"], {})
+            save_payload, error = self._payload(save_form, {})
+            if error or save_payload is None:
+                return _partial_draft(
+                    "delete_assignment_files",
+                    "El formulario de guardado no se pudo reconstruir con seguridad",
+                )
+            saved = await self._post(save_form.action, save_payload)
+        except Exception:
+            if mutations:
+                return _partial_draft(
+                    "delete_assignment_files",
+                    "Fallo de transporte tras modificar el area de borrador; no reintentar",
+                )
+            raise
+        result = _performed("delete_assignment_files", saved)
+        result.update({"draft_mutations": mutations, "do_not_retry": True})
+        return result
 
     async def save_assignment(
         self,

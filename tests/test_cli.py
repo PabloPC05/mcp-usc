@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import json
+import sys
+
+from mcp_usc import cli
+
+
+def test_import_session_cli_uses_hidden_prompt_and_never_prints_cookie(
+    monkeypatch, capsys
+) -> None:
+    cookie = "abcdef0123456789abcdef0123456789"
+    prompted: list[str] = []
+
+    def fake_getpass(prompt: str) -> str:
+        prompted.append(prompt)
+        return cookie
+
+    async def fake_import(settings, supplied_cookie: str) -> dict[str, object]:
+        del settings
+        assert supplied_cookie == cookie
+        return {
+            "authenticated": True,
+            "method": "moodle_http_session",
+            "user_id": 42,
+        }
+
+    monkeypatch.setattr(sys, "argv", ["mcp-usc", "import-session"])
+    monkeypatch.setattr(cli.getpass, "getpass", fake_getpass)
+    monkeypatch.setattr(cli, "import_session_cookie", fake_import)
+
+    cli.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["authenticated"] is True
+    assert captured.err == ""
+    assert cookie not in captured.out
+    assert prompted == ["Valor de MoodleSession (entrada oculta): "]
+
+
+def test_forget_session_cli_reports_local_only_logout(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["mcp-usc", "forget-session"])
+    monkeypatch.setattr(
+        cli,
+        "forget_session_cookie",
+        lambda: {
+            "authenticated": False,
+            "local_session_removed": True,
+            "remote_session_unchanged": True,
+        },
+    )
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["local_session_removed"] is True
+    assert result["remote_session_unchanged"] is True

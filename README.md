@@ -4,7 +4,7 @@ Servidor MCP local y HTTP-first para el Campus Virtual Moodle de la Universidade
 Compostela. Permite consultar cursos, calendario, mensajes, foros, materiales, tareas y
 cuestionarios, además de buscar fechas de examen en páginas y PDF oficiales de la USC.
 
-La versión 0.3.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
+La versión 0.4.0 amplía la cobertura del alumno a 301 capacidades Moodle estudiadas: 192 lecturas
 permitidas y 109 acciones identificadas. Solo doce cambios privados de alcance inequívoco se
 pueden ejecutar por la interfaz genérica; publicaciones, actividades evaluables, entregas,
 cuestionarios y eliminaciones usan herramientas contextuales. Toda operación con efecto exige
@@ -16,7 +16,8 @@ previsualización, token de un solo uso y aprobación del cliente MCP.
 - Las consultas y escrituras normales no automatizan un navegador.
 - Se prefiere la API REST oficial de Moodle cuando hay un token legítimo.
 - Con una cookie `MoodleSession`, las lecturas usan AJAX *same-origin* y descargas directas
-  `/pluginfile.php`. Los formularios HTML se reservan a operaciones de cuestionario ya confirmadas.
+  `/pluginfile.php`. Los formularios HTML de tareas y cuestionarios solo se abren después de una
+  confirmación explícita.
 - Playwright solo abre un navegador visible para completar Microsoft Entra/MFA y obtener la cookie
   inicial. Se cierra al terminar el login.
 - Todo texto remoto —nombres, mensajes, preguntas, avisos y documentos— se marca como contenido no
@@ -87,6 +88,20 @@ Moodle no implica que esté habilitada en el servicio asociado al token.
 
 ### Sesión por cookie
 
+Ruta sin Playwright, reutilizando una sesión que ya hayas abierto personalmente en el navegador:
+
+```powershell
+uv run mcp-usc import-session
+uv run mcp-usc status
+```
+
+En las herramientas de desarrollo del navegador, abre **Aplicación/Almacenamiento > Cookies >
+https://cv.usc.es**, copia solo el valor de `MoodleSession` y pégalo en el prompt oculto. No lo
+incluyas en un comando, captura, `.env` o archivo. El programa lo valida mediante una lectura HTTP de
+Preferencias y solo entonces lo guarda en Credential Manager.
+
+La alternativa asistida abre una ventana visible una sola vez y requiere el extra `browser-auth`:
+
 ```powershell
 uv run mcp-usc login
 uv run mcp-usc status
@@ -104,12 +119,15 @@ Después del login, todas las operaciones usan `httpx`:
 - las lecturas fallan de forma cerrada si Moodle no las publica por AJAX;
 - las descargas autenticadas conservan la cookie, aceptan solo `/pluginfile.php` directo y aplican
   límites locales;
-- únicamente ciertas operaciones de cuestionario, después de confirmación explícita, pueden usar
-  formularios HTML.
+- ciertas operaciones de tareas y cuestionarios, después de confirmación explícita, usan
+  formularios HTML oficiales descubiertos en una respuesta fresca del servidor.
 
 El `sesskey` no se persiste ni se devuelve. Por exigencia del protocolo AJAX puede aparecer en la
 URL que ve la infraestructura de Moodle. La cookie equivale a una credencial mientras esté vigente:
-no la copies, registres, publiques ni sincronices. Cuando caduque, repite `mcp-usc login`.
+si utilizas la importación manual, cópiala únicamente al prompt oculto; nunca la registres, publiques
+ni sincronices. Cuando caduque, repite `mcp-usc import-session` o `mcp-usc login`.
+Para borrar únicamente la copia local, sin enviar un cierre de sesión al Campus, ejecuta
+`uv run mcp-usc forget-session`.
 
 ### Matriz de compatibilidad
 
@@ -123,14 +141,16 @@ no la copies, registres, publiques ni sincronices. Cuando caduque, repite `mcp-u
 | Crear/borrar eventos personales | REST | No disponible de forma segura por AJAX |
 | Enviar/retirar respuesta Choice | REST | No disponible de forma segura por AJAX |
 | Materiales y recursos | REST | AJAX y descarga `/pluginfile.php` directa; nunca `view.php` |
-| Lectura y modificación de tareas | REST | No disponible de forma segura |
-| Archivos de entregas | REST + `/webservice/upload.php` multipart | No se manipula el `filemanager` JavaScript |
+| Lectura y modificación de tareas | REST | Listado AJAX puro; estado y cambios mediante formularios confirmados |
+| Archivos de entregas | REST + `/webservice/upload.php` multipart | Formularios non-JS de borrador y selector de archivos, tras confirmar |
 | Cuestionarios | REST | AJAX para lecturas puras; formulario solo tras confirmar acciones |
 
-El gestor `filemanager` de Moodle crea borradores mediante JavaScript y no equivale a un campo
-multipart estándar. Si una entrega solo ofrece ese gestor, reemplazar o borrar sus archivos requiere
-un token REST autorizado; las herramientas públicas de archivos en modo sesión se detienen sin
-modificar nada. No se usa Playwright para emular el gestor de archivos.
+En modo sesión no se ejecuta JavaScript ni se usa Playwright. Para los archivos se sigue el flujo
+non-JS que el propio Moodle publica: gestor de borradores, selector de repositorio y formulario
+multipart descubiertos desde HTML fresco. Si la instalación o un complemento no expone una variante
+reconocida, la operación se detiene sin inventar campos. Un fallo después de modificar el borrador
+puede dejarlo parcialmente cambiado; se devuelve `outcome="unknown"` y `do_not_retry=true` para que
+no se repita automáticamente.
 
 ## Archivos locales autorizados
 
@@ -208,18 +228,19 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.3.0 expone 75 herramientas: 39 lecturas, 18 previsualizaciones y 18 operaciones con
-efecto. El [estudio completo de capacidades](docs/student-capability-study.md) explica el inventario,
-las fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
+La versión 0.4.0 expone 77 herramientas: 39 lecturas puras, 19 previsualizaciones, 18 operaciones con
+efecto y una inspección potencialmente *stateful* que también exige confirmación. El
+[estudio completo de capacidades](docs/student-capability-study.md) explica el inventario, las
+fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
 
-| Grupo | Lectura | Previsualización | Escritura |
+| Grupo | Lectura pura | Confirmación previa | Operación confirmada |
 | --- | --- | --- | --- |
 | Catálogo del alumno | `list_student_capabilities`, `call_student_read`, perfil, preferencias, participantes, grupos, notas, progreso, notificaciones, insignias y archivos privados | `preview_student_action` | `execute_student_action` |
 | Campus y agenda | `auth_status`, `list_courses`, `list_pending_work`, `list_upcoming_events`, `get_work_item`, `list_announcements`, `list_calendar_events` | crear o borrar un evento personal | crear o borrar un evento personal |
 | Mensajes y foros | `list_messages`, `list_conversation_messages`, `list_forums`, `list_forum_discussions`, `search_message_contacts`; `list_discussion_posts` se conserva pero falla cerrado | mensaje, inspección de posts, nueva discusión o respuesta | enviar mensaje, inspeccionar posts, crear discusión o responder |
 | Choice | funciones de lectura del catálogo | enviar o retirar respuesta | enviar o retirar respuesta propia |
 | Materiales y exámenes | `list_course_contents`, `list_course_resources`, `read_course_resource`, `list_exam_sources`, `search_exam_dates` | — | — |
-| Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
+| Tareas | `list_assignments`, `get_submission_status`, `check_submission_reopen` | `preview_inspect_submission_status`, `preview_save_online_submission`, `preview_replace_submission_files`, `preview_delete_submission_files`, `preview_submit_assignment`, `preview_remove_submission` | `inspect_submission_status`, `save_online_submission`, `replace_submission_files`, `delete_submission_files`, `submit_assignment`, `remove_submission` |
 | Cuestionarios | `list_quizzes`, `list_quiz_attempts`, revisión final y mejor nota | inspeccionar intento activo, iniciar, guardar o finalizar | inspeccionar intento activo, iniciar, guardar o finalizar |
 
 `call_student_read` solo acepta las 192 funciones incluidas expresamente en la lista blanca; no es
@@ -269,10 +290,17 @@ ejecutarlas ni implica que la USC tenga activo el módulo o plugin correspondien
 
 - Con un token REST que anuncie las funciones necesarias se pueden listar tareas y consultar
   borrador, archivos, texto online, feedback y permisos.
-- Las páginas HTML de tareas registran vistas y pueden cambiar la finalización; por ello todas las
-  lecturas, previsualizaciones y escrituras de tareas fallan antes de abrirlas en modo sesión.
+- En modo sesión, `list_assignments` usa el estado AJAX puro del curso y devuelve
+  `course_module_id` (CMID); no inventa un `assignment_id`, que queda como `null`.
+- Abrir la página HTML de una tarea puede registrar una vista o cambiar la finalización. Por eso
+  `preview_inspect_submission_status` no accede al Campus y `inspect_submission_status` solo abre la
+  página después de consumir su confirmación. `get_submission_status` conserva la lectura REST.
+- Las previsualizaciones de cambios tampoco abren la tarea. Tras confirmar, la operación obtiene un
+  formulario oficial fresco y comprueba acción, `sesskey`, usuario y campos antes de enviarlo.
 - Guardar texto, reemplazar/borrar archivos, enviar para calificación o eliminar la entrega completa
   son escrituras distintas, cada una con su propia vista previa.
+- Los archivos de sesión usan los formularios non-JS de borrador y repositorio que exponga Moodle.
+  Un formulario desconocido falla cerrado; un resultado de red ambiguo nunca se reintenta.
 - `submit_assignment` puede cerrar la edición del borrador y debe respetar la declaración de entrega
   que muestre Moodle.
 - `remove_submission` usa `mod_assign_remove_submission`, disponible en Moodle 4.5 o posterior. Es
@@ -348,6 +376,13 @@ El contrato se contrastó con documentación y código oficial:
   [tareas](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/mod/assign/externallib.php) y
   [cuestionarios](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/mod/quiz/classes/external.php)
   del repositorio oficial GPL-3.0.
+- Flujo web oficial de tareas en
+  [`mod/assign/view.php`](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/mod/assign/view.php)
+  y [`mod/assign/locallib.php`](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/mod/assign/locallib.php),
+  listado puro [`core_courseformat_get_state`](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/course/format/classes/external/get_state.php)
+  y formularios non-JS de
+  [borradores](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/repository/draftfiles_manager.php)
+  y [repositorios](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/repository/filepicker.php).
 - [`moodlehq/moodleapp`](https://github.com/moodlehq/moodleapp) (Apache-2.0), referencia oficial de
   uso de servicios, contenidos y recursos desde un cliente.
 
@@ -376,11 +411,12 @@ se copió código.
 
 - La disponibilidad de cada Web Service depende de la versión, configuración y permisos que la USC
   asigne al token o sesión.
-- La sesión OIDC y `MoodleSession` caducan; hay que ejecutar de nuevo `mcp-usc login`.
-- AJAX y los formularios de cuestionario pueden cambiar entre versiones. El conector falla de forma
-  cerrada si no reconoce con seguridad una operación.
-- Las tareas exigen REST: sus páginas registran vistas y el `filemanager` JavaScript no equivale a
-  un campo multipart nativo.
+- La sesión OIDC y `MoodleSession` caducan; hay que ejecutar de nuevo `mcp-usc import-session` o
+  `mcp-usc login`.
+- AJAX y los formularios de tareas o cuestionarios pueden cambiar entre versiones. El conector
+  falla de forma cerrada si no reconoce con seguridad una operación.
+- Las entregas con complementos personalizados, repositorios no expuestos en modo non-JS o
+  formularios distintos de los reconocidos pueden seguir necesitando un token REST autorizado.
 - Eliminar una entrega completa exige Moodle 4.5+ y permisos vigentes. Reabrir una entrega cerrada
   corresponde al profesorado.
 - No todo el profesorado usa el Campus Virtual; correo o Teams pueden contener información que este

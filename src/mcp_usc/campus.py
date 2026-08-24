@@ -9,21 +9,22 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from .credentials import CredentialStore
 from .security import html_to_text, validate_usc_url
-from .session_forms import FormResponse, MoodleSessionForms
+from .session_auth import SESSION_CREDENTIAL_NAME
+from .session_forms import FormResponse, FormUpload, MoodleSessionForms
 from .settings import Settings
 
-SESSION_CREDENTIAL_NAME = "moodle-session"
-_USER_AGENT = "mcp-usc/0.3 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = "mcp-usc/0.4 (+https://github.com/PabloPC05/mcp-usc)"
 _ANNOUNCEMENT_TERMS = (
     "announcement",
     "anuncio",
@@ -38,6 +39,7 @@ _SESSKEY_PATTERNS = (
     re.compile(r"sesskey=([A-Za-z0-9_-]{5,128})"),
 )
 _USER_ID_PATTERNS = (re.compile(r'["\']user(?:id|Id)["\']\s*:\s*["\']?(\d+)'),)
+_SESSION_COOKIE_VALUE = re.compile(r"[A-Za-z0-9,_-]{8,512}\Z")
 _MAX_JSON_RESPONSE_BYTES = 5 * 1024 * 1024
 _SESSION_UNAVAILABLE_ACTIONS = frozenset(
     {
@@ -67,6 +69,14 @@ class CampusProtocolError(CampusError):
 
 class CampusCapabilityUnavailable(CampusProtocolError):
     """Moodle explicitly reported that an external function is unavailable."""
+
+
+class CampusMutationOutcomeUnknown(CampusError):
+    """A non-idempotent HTTP request may have reached Moodle."""
+
+    request_may_have_been_sent = True
+    outcome = "unknown"
+    do_not_retry = True
 
 
 class CampusGateway(ABC):
@@ -144,6 +154,20 @@ def _moodle_file_url(url: str, base_url: str, *, webservice: bool) -> str:
     ):
         raise ValueError("El recurso no pertenece al Campus Virtual configurado")
     path = parsed.path
+    if "\\" in path or any(ord(character) < 32 for character in path):
+        raise ValueError("La ruta del recurso Moodle no es valida")
+    decoded_path = path
+    for _ in range(3):
+        next_path = unquote(decoded_path)
+        if next_path == decoded_path:
+            break
+        decoded_path = next_path
+    if "\\" in decoded_path or any(
+        segment in {".", ".."} for segment in decoded_path.split("/")
+    ):
+        raise ValueError("La ruta del recurso Moodle no es canonica")
+    if re.search(r"%(?:2f|5c|00|0d|0a)", path, flags=re.IGNORECASE):
+        raise ValueError("La ruta codificada del recurso Moodle no es valida")
     for prefix in ("/webservice/pluginfile.php", "/pluginfile.php"):
         if path == prefix or path.startswith(f"{prefix}/"):
             suffix = path[len(prefix) :]
@@ -381,8 +405,8 @@ class RestMoodleGateway(CampusGateway):
                 content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
         except CampusError:
             raise
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
+        except httpx.HTTPError:
+            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from None
         try:
             payload = json.loads(content)
         except (json.JSONDecodeError, ValueError) as exc:
@@ -429,8 +453,8 @@ class RestMoodleGateway(CampusGateway):
                     data={"token": token, "itemid": str(item_id), "filepath": filepath},
                     files={"file_1": (filename, content, "application/octet-stream")},
                 )
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo subir el archivo de borrador por HTTP.") from exc
+        except httpx.HTTPError:
+            raise CampusError("No se pudo subir el archivo de borrador por HTTP.") from None
         if response.is_redirect or response.status_code in {401, 403}:
             raise AuthenticationRequired("Moodle rechazó la subida con el token configurado.")
         if response.status_code >= 400:
@@ -467,8 +491,8 @@ class RestMoodleGateway(CampusGateway):
                 media_type = response.headers.get("content-type", "").split(";", 1)[0]
         except CampusError:
             raise
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo descargar el recurso del Campus Virtual.") from exc
+        except httpx.HTTPError:
+            raise CampusError("No se pudo descargar el recurso del Campus Virtual.") from None
         return content, media_type, safe_url
 
     async def _info(self) -> dict[str, Any]:
@@ -672,6 +696,8 @@ class HttpSessionMoodleGateway(CampusGateway):
             raise AuthenticationRequired(
                 "No hay una sesión del Campus Virtual. Ejecuta `mcp-usc login`."
             )
+        if not _SESSION_COOKIE_VALUE.fullmatch(cookie):
+            raise AuthenticationRequired("La sesion guardada no tiene un formato valido.")
         self._cookie_value = cookie
         return cookie
 
@@ -697,15 +723,32 @@ class HttpSessionMoodleGateway(CampusGateway):
             current = response.cookies.get("MoodleSession")
         except httpx.CookieConflict:
             current = None
-        if current and current != previous:
-            self.store.set(SESSION_CREDENTIAL_NAME, current)
+        if current and current != previous and _SESSION_COOKIE_VALUE.fullmatch(current):
             self._cookie_value = current
+            # The validated cookie remains usable in this process. A local keyring
+            # failure after a Moodle mutation must never surface as a retryable error.
+            with suppress(Exception):
+                self.store.set(SESSION_CREDENTIAL_NAME, current)
+
+    @staticmethod
+    def _is_auth_failure_response(response: httpx.Response) -> bool:
+        if response.status_code in {401, 403}:
+            return True
+        if not response.is_redirect:
+            return False
+        location = response.headers.get("location", "")
+        parsed = urlparse(urljoin(str(response.url), location))
+        host = (parsed.hostname or "").casefold()
+        path = parsed.path.casefold()
+        return (
+            "/login/" in path
+            or "/logout" in path
+            or host.endswith("login.microsoftonline.com")
+        )
 
     @staticmethod
     def _ensure_authenticated_response(response: httpx.Response) -> None:
-        location = response.headers.get("location", "")
-        path = urlparse(location).path.lower()
-        if response.is_redirect and ("/login/" in path or "login.microsoftonline" in location):
+        if HttpSessionMoodleGateway._is_auth_failure_response(response):
             raise AuthenticationRequired(
                 "La sesión del Campus Virtual ha caducado. Ejecuta `mcp-usc login`."
             )
@@ -723,10 +766,10 @@ class HttpSessionMoodleGateway(CampusGateway):
         try:
             async with self._client(cookie) as client:
                 response = await client.get(self._url(path, query))
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
-        self._remember_rotated_cookie(response, cookie)
+        except httpx.HTTPError:
+            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from None
         self._ensure_authenticated_response(response)
+        self._remember_rotated_cookie(response, cookie)
         return response
 
     async def _session_context(self) -> _SessionContext:
@@ -779,13 +822,13 @@ class HttpSessionMoodleGateway(CampusGateway):
                     },
                 ) as response,
             ):
-                self._remember_rotated_cookie(response, cookie)
                 self._ensure_authenticated_response(response)
+                self._remember_rotated_cookie(response, cookie)
                 content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
         except CampusError:
             raise
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from exc
+        except httpx.HTTPError:
+            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from None
         try:
             envelope = json.loads(content)
         except (json.JSONDecodeError, ValueError) as exc:
@@ -829,6 +872,8 @@ class HttpSessionMoodleGateway(CampusGateway):
                 for _ in range(6):
                     request = client.build_request("GET", target)
                     response = await client.send(request, stream=True)
+                    if self._is_auth_failure_response(response):
+                        self._ensure_authenticated_response(response)
                     self._remember_rotated_cookie(response, cookie)
                     if response.is_redirect:
                         location = response.headers.get("location", "")
@@ -856,8 +901,8 @@ class HttpSessionMoodleGateway(CampusGateway):
                     raise CampusProtocolError("Moodle devolvió demasiadas redirecciones.")
         except CampusError:
             raise
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo descargar el recurso del Campus Virtual.") from exc
+        except httpx.HTTPError:
+            raise CampusError("No se pudo descargar el recurso del Campus Virtual.") from None
         if content is None:
             raise CampusProtocolError("Moodle no devolvió el contenido del recurso.")
         return content, media_type, final_url
@@ -866,14 +911,36 @@ class HttpSessionMoodleGateway(CampusGateway):
         resolved = urljoin(f"{self.base_url}/", url)
         parsed = urlparse(resolved)
         base = urlparse(self.base_url)
-        allowed_prefixes = ("/mod/assign/", "/mod/quiz/", "/course/", "/my/")
+        allowed_paths = frozenset(
+            {
+                "/course/view.php",
+                "/mod/assign/view.php",
+                "/mod/quiz/attempt.php",
+                "/mod/quiz/processattempt.php",
+                "/mod/quiz/startattempt.php",
+                "/mod/quiz/summary.php",
+                "/mod/quiz/view.php",
+                "/repository/draftfiles_manager.php",
+                "/repository/filepicker.php",
+            }
+        )
+        decoded_path = parsed.path
+        for _ in range(3):
+            next_path = unquote(decoded_path)
+            if next_path == decoded_path:
+                break
+            decoded_path = next_path
         if (
             parsed.scheme != "https"
             or parsed.hostname != base.hostname
             or parsed.port not in (None, 443)
             or parsed.username
             or parsed.password
-            or not parsed.path.startswith(allowed_prefixes)
+            or parsed.fragment
+            or "\\" in decoded_path
+            or any(segment in {".", ".."} for segment in decoded_path.split("/"))
+            or decoded_path != parsed.path
+            or parsed.path not in allowed_paths
         ):
             raise CampusProtocolError("El formulario Moodle apunta a un destino no permitido.")
         if query:
@@ -894,6 +961,16 @@ class HttpSessionMoodleGateway(CampusGateway):
         request_method = method.upper()
         request_data = data
         request_files = files
+        initial_query = parse_qs(urlparse(target).query)
+        mutating_get = (initial_query.get("action") or [""])[0] in {
+            "deletedraft",
+            "removesubmission",
+        }
+        is_mutation = request_method != "GET" or mutating_get
+        stateful_get = request_method == "GET" and urlparse(target).path.startswith(
+            ("/mod/assign/", "/mod/quiz/")
+        )
+        outcome_may_be_unknown = is_mutation or stateful_get
         try:
             async with self._client(cookie) as client:
                 for _ in range(4):
@@ -903,13 +980,29 @@ class HttpSessionMoodleGateway(CampusGateway):
                         data=request_data,
                         files=request_files,
                     )
+                    if self._is_auth_failure_response(response):
+                        self._ensure_authenticated_response(response)
                     self._remember_rotated_cookie(response, cookie)
                     if not response.is_redirect:
                         break
+                    if is_mutation:
+                        return FormResponse(str(response.url), "", response.status_code)
+                    if stateful_get:
+                        raise CampusMutationOutcomeUnknown(
+                            "Moodle proceso una lectura stateful y redirigio; no reintentar."
+                        ) from None
                     location = response.headers.get("location", "")
                     if not location:
                         break
-                    target = self._safe_form_url(urljoin(str(response.url), location))
+                    redirect_target = self._safe_form_url(urljoin(str(response.url), location))
+                    redirect_query = parse_qs(urlparse(redirect_target).query)
+                    if "sesskey" in redirect_query or (
+                        redirect_query.get("action") or [""]
+                    )[0] in {"deletedraft", "removesubmission", "confirmsubmit"}:
+                        raise CampusProtocolError(
+                            "Moodle intento redirigir una lectura a una accion no permitida."
+                        )
+                    target = redirect_target
                     request_method = "GET"
                     request_data = None
                     request_files = None
@@ -917,10 +1010,23 @@ class HttpSessionMoodleGateway(CampusGateway):
                     raise CampusProtocolError("Moodle devolvió demasiadas redirecciones.")
         except CampusError:
             raise
-        except httpx.HTTPError as exc:
-            raise CampusError("No se pudo completar el formulario HTTP de Moodle.") from exc
+        except httpx.HTTPError:
+            if outcome_may_be_unknown:
+                raise CampusMutationOutcomeUnknown(
+                    "Moodle puede haber recibido la mutacion; resultado desconocido, no reintentar."
+                ) from None
+            raise CampusError("No se pudo completar el formulario HTTP de Moodle.") from None
+        if outcome_may_be_unknown and response.status_code >= 500:
+            raise CampusMutationOutcomeUnknown(
+                "Moodle devolvio un error tras la mutacion; resultado desconocido, no reintentar."
+            ) from None
         self._ensure_authenticated_response(response)
         if len(response.content) > 5 * 1024 * 1024:
+            if outcome_may_be_unknown:
+                raise CampusMutationOutcomeUnknown(
+                    "Moodle respondio tras la operacion, pero el resultado es demasiado grande; "
+                    "no reintentar."
+                ) from None
             raise CampusProtocolError("La respuesta del formulario Moodle es demasiado grande.")
         return FormResponse(str(response.url), response.text, response.status_code)
 
@@ -937,12 +1043,35 @@ class HttpSessionMoodleGateway(CampusGateway):
         files: Mapping[str, Any],
     ) -> FormResponse:
         safe_files: dict[str, tuple[str, bytes, str]] = {}
+        total = 0
         for name, value in files.items():
-            if not isinstance(name, str) or not isinstance(value, bytes):
-                raise ValueError("Los adjuntos multipart deben proporcionarse como bytes")
-            if len(value) > self.settings.max_upload_bytes:
+            if not isinstance(name, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.:\-\[\]]{1,256}", name
+            ):
+                raise ValueError("El campo multipart no es válido")
+            if isinstance(value, bytes):
+                filename = "attachment"
+                content = value
+                content_type = "application/octet-stream"
+            elif isinstance(value, FormUpload):
+                filename = value.filename
+                content = value.content
+                content_type = value.content_type
+            else:
+                raise ValueError("Los adjuntos multipart deben estar verificados en memoria")
+            if any(ord(character) < 32 or ord(character) == 127 for character in filename):
+                raise ValueError("El nombre multipart contiene caracteres de control")
+            if any(ord(character) < 32 or ord(character) == 127 for character in content_type):
+                raise ValueError("El tipo MIME contiene caracteres de control")
+            if any(character in filename for character in ("/", "\\")):
+                raise ValueError("El nombre multipart no es válido")
+            total += len(content)
+            if (
+                len(content) > self.settings.max_upload_bytes
+                or total > self.settings.max_upload_bytes
+            ):
                 raise ValueError("Un adjunto supera el límite de subida configurado")
-            safe_files[name] = ("attachment", value, "application/octet-stream")
+            safe_files[name] = (filename, content, content_type)
         return await self._form_request("POST", url, data=data, files=safe_files)
 
     def session_forms(self) -> MoodleSessionForms:

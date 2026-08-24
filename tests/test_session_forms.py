@@ -7,6 +7,7 @@ import pytest
 
 from mcp_usc.session_forms import (
     FormResponse,
+    FormUpload,
     MoodleSessionForms,
     SessionFormConfirmationRequired,
 )
@@ -19,6 +20,18 @@ def test_form_response_repr_does_not_expose_session_data() -> None:
     )
 
     assert "secret123" not in repr(response)
+
+
+def test_parsed_form_repr_does_not_expose_sesskey_in_action() -> None:
+    http = FakeHttp([])
+    response = FormResponse(
+        f"{BASE}/mod/assign/view.php",
+        '<form method="post" action="/mod/assign/view.php?sesskey=secret123"></form>',
+    )
+
+    parsed = http.client()._forms(response, frozenset({"/mod/assign/view.php"}))
+
+    assert "secret123" not in repr(parsed)
 
 
 BASE = "https://cv.usc.es"
@@ -145,6 +158,108 @@ async def test_direct_multipart_is_used_only_for_discovered_file_input() -> None
     assert result["request_sent"] is True
     assert len(http.multipart_calls) == 1
     assert http.post_calls == []
+
+
+def _filemanager_assignment_form() -> str:
+    return _assignment_form(
+        file_input='<input type="hidden" name="files_filemanager" value="88">'
+    ).replace(
+        "</form>",
+        '<a href="/repository/draftfiles_manager.php?action=browse&amp;itemid=88&amp;'
+        'sesskey=abc123">Gestionar archivos</a></form>',
+    )
+
+
+def _draft_manager(*, with_file: bool = True) -> str:
+    delete = (
+        '<a href="/repository/draftfiles_manager.php?action=deletedraft&amp;itemid=88&amp;'
+        'filepath=%2F&amp;filename=old.txt&amp;sesskey=abc123">Eliminar old.txt</a>'
+        if with_file
+        else ""
+    )
+    return (
+        delete
+        + '<a href="/repository/filepicker.php?action=plugins&amp;itemid=88&amp;'
+        'sesskey=abc123">Agregar</a>'
+    )
+
+
+def _repository_plugins() -> str:
+    return (
+        '<a href="/repository/filepicker.php?action=list&amp;itemid=88&amp;repo_id=4&amp;'
+        'sesskey=abc123">Subir un archivo</a>'
+    )
+
+
+def _repository_upload_form() -> str:
+    return """
+    <form method="post" enctype="multipart/form-data"
+      action="/repository/filepicker.php?action=list&amp;itemid=88&amp;repo_id=4&amp;sesskey=abc123">
+      <input type="hidden" name="action" value="upload">
+      <input type="hidden" name="draftpath" value="/">
+      <input type="hidden" name="savepath" value="/">
+      <input type="hidden" name="repo_id" value="4">
+      <input type="file" name="repo_upload_file">
+    </form>
+    """
+
+
+async def test_replace_assignment_files_uses_server_discovered_non_js_draft_flow() -> None:
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", _filemanager_assignment_form()),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", _draft_manager()),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_plugins()),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_upload_form()),
+            FormResponse(
+                f"{BASE}/repository/draftfiles_manager.php", _draft_manager(with_file=False)
+            ),
+        ]
+    )
+
+    result = await http.client().replace_assignment_files(
+        17,
+        [FormUpload("answer.txt", b"confirmed bytes", "text/plain")],
+        confirmed=True,
+    )
+
+    assert result["request_sent"] is True
+    assert result["draft_mutations"] == 2
+    assert "deletedraft" in http.get_calls[-1][0]
+    assert len(http.multipart_calls) == 1
+    _, upload_data, upload_files = http.multipart_calls[0]
+    assert upload_data["action"] == "upload"
+    assert upload_files["repo_upload_file"].content == b"confirmed bytes"
+    assert len(http.post_calls) == 1
+    assert http.post_calls[0][1]["files_filemanager"] == "88"
+
+
+async def test_delete_assignment_files_requires_confirmation_before_page_view() -> None:
+    http = FakeHttp([])
+
+    with pytest.raises(SessionFormConfirmationRequired):
+        await http.client().delete_assignment_files(17, confirmed=False)
+
+    assert http.get_calls == []
+
+
+async def test_delete_assignment_files_deletes_discovered_files_then_saves_form() -> None:
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", _filemanager_assignment_form()),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", _draft_manager()),
+            FormResponse(
+                f"{BASE}/repository/draftfiles_manager.php", _draft_manager(with_file=False)
+            ),
+        ]
+    )
+
+    result = await http.client().delete_assignment_files(17, confirmed=True)
+
+    assert result["request_sent"] is True
+    assert result["draft_mutations"] == 1
+    assert "deletedraft" in http.get_calls[-1][0]
+    assert len(http.post_calls) == 1
 
 
 def _submit_assignment_form() -> str:

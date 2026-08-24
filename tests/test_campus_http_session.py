@@ -11,6 +11,8 @@ from mcp_usc.campus import (
     SESSION_CREDENTIAL_NAME,
     AuthenticationRequired,
     CampusCapabilityUnavailable,
+    CampusError,
+    CampusMutationOutcomeUnknown,
     CampusProtocolError,
     HttpSessionMoodleGateway,
     _activities_from_sections,
@@ -246,7 +248,7 @@ async def test_session_file_download_converts_webservice_url_and_uses_cookie() -
 
 
 @respx.mock
-async def test_session_form_adapter_posts_fresh_assignment_form_and_follows_safe_redirect() -> None:
+async def test_session_form_adapter_never_follows_redirect_after_post() -> None:
     store = MemoryCredentialStore("session-secret")
     form_html = """
     <form method="post" action="/mod/assign/view.php">
@@ -264,7 +266,7 @@ async def test_session_form_adapter_posts_fresh_assignment_form_and_follows_safe
     posted = respx.post("https://cv.usc.es/mod/assign/view.php").mock(
         return_value=httpx.Response(303, headers={"location": "/mod/assign/view.php?id=17"})
     )
-    respx.get("https://cv.usc.es/mod/assign/view.php", params={"id": 17}).mock(
+    redirected = respx.get("https://cv.usc.es/mod/assign/view.php", params={"id": 17}).mock(
         return_value=httpx.Response(200, text="<p>Entrega actualizada</p>")
     )
     gateway = HttpSessionMoodleGateway(_settings(), store)  # type: ignore[arg-type]
@@ -278,10 +280,145 @@ async def test_session_form_adapter_posts_fresh_assignment_form_and_follows_safe
     assert result["request_sent"] is True
     assert result["outcome"] == "unknown"
     assert posted.call_count == 1
+    assert redirected.call_count == 0
+    assert result["http_status"] == 303
     assert b"sesskey=abc123" in posted.calls[0].request.content
     assert b"onlinetext_editor%5Bformat%5D=2" in posted.calls[0].request.content
     assert posted.calls[0].request.headers["cookie"] == "MoodleSession=session-secret"
     assert "abc123" not in str(result)
+
+
+@respx.mock
+async def test_auth_redirect_does_not_persist_deleted_cookie() -> None:
+    store = MemoryCredentialStore("expired-secret")
+    route = respx.get("https://cv.usc.es/user/preferences.php").mock(
+        return_value=httpx.Response(
+            302,
+            headers={
+                "location": "https://login.microsoftonline.com/common/oauth2/authorize",
+                "set-cookie": "MoodleSession=deleted; Secure; HttpOnly; Path=/",
+            },
+        )
+    )
+
+    with pytest.raises(AuthenticationRequired):
+        await HttpSessionMoodleGateway(_settings(), store).status()  # type: ignore[arg-type]
+
+    assert route.call_count == 1
+    assert store.set_calls == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://cv.usc.es/mod/assign/../../admin/index.php",
+        "https://cv.usc.es/mod/assign/%2e%2e/%2e%2e/admin/index.php",
+    ],
+)
+@respx.mock
+async def test_form_url_rejects_dot_segments_before_http(url: str) -> None:
+    route = respx.get("https://cv.usc.es/admin/index.php").mock(
+        return_value=httpx.Response(200, text="must not run")
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusProtocolError):
+        await gateway._form_get(url, {})
+
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_pluginfile_rejects_dot_segments_before_http() -> None:
+    route = respx.get("https://cv.usc.es/admin/index.php").mock(
+        return_value=httpx.Response(200, text="must not run")
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusCapabilityUnavailable):
+        await gateway.fetch_file(
+            "https://cv.usc.es/pluginfile.php/%2e%2e/%2e%2e/admin/index.php", 1024
+        )
+
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_form_post_timeout_is_unknown_without_secret_cause_or_retry() -> None:
+    route = respx.post("https://cv.usc.es/mod/assign/view.php").mock(
+        side_effect=httpx.ReadTimeout("secret", request=httpx.Request("POST", "https://x"))
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusMutationOutcomeUnknown) as caught:
+        await gateway._form_post(
+            "https://cv.usc.es/mod/assign/view.php",
+            {"sesskey": "abc123", "action": "savesubmission"},
+        )
+
+    assert route.call_count == 1
+    assert caught.value.__cause__ is None
+    assert caught.value.request_may_have_been_sent is True
+    assert caught.value.do_not_retry is True
+
+
+@respx.mock
+async def test_form_post_500_is_unknown_and_not_retried() -> None:
+    route = respx.post("https://cv.usc.es/mod/assign/view.php").mock(
+        return_value=httpx.Response(500, text="failed after processing")
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusMutationOutcomeUnknown) as caught:
+        await gateway._form_post(
+            "https://cv.usc.es/mod/assign/view.php",
+            {"sesskey": "abc123", "action": "savesubmission"},
+        )
+
+    assert route.call_count == 1
+    assert caught.value.do_not_retry is True
+
+
+@respx.mock
+async def test_form_auth_redirect_is_not_followed() -> None:
+    route = respx.get("https://cv.usc.es/mod/assign/view.php").mock(
+        return_value=httpx.Response(302, headers={"location": "/login/index.php"})
+    )
+    login = respx.get("https://cv.usc.es/login/index.php").mock(
+        return_value=httpx.Response(200, text="must not run")
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(AuthenticationRequired):
+        await gateway._form_get("https://cv.usc.es/mod/assign/view.php", {"id": 17})
+
+    assert route.call_count == 1
+    assert login.call_count == 0
+
+
+@respx.mock
+async def test_session_get_network_error_has_no_cookie_bearing_cause() -> None:
+    respx.get("https://cv.usc.es/user/preferences.php").mock(
+        side_effect=httpx.ConnectError("failed")
+    )
+    gateway = HttpSessionMoodleGateway(  # type: ignore[arg-type]
+        _settings(), MemoryCredentialStore("session-secret")
+    )
+
+    with pytest.raises(CampusError) as caught:
+        await gateway.status()
+
+    assert caught.value.__cause__ is None
 
 
 @respx.mock

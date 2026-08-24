@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import sys
 
 from .campus import CampusError, interactive_login
 from .service import UscService
+from .session_auth import SessionImportError, forget_session_cookie, import_session_cookie
 from .settings import Settings
 
 
@@ -18,6 +20,14 @@ def _parser() -> argparse.ArgumentParser:
         "login", help="Abre un navegador temporal para completar Microsoft/MFA"
     )
     login.add_argument("--timeout", type=int, default=900, help="Tiempo máximo en segundos")
+    subparsers.add_parser(
+        "import-session",
+        help="Importa MoodleSession mediante una entrada oculta, sin Playwright",
+    )
+    subparsers.add_parser(
+        "forget-session",
+        help="Elimina la cookie local sin cerrar la sesión remota",
+    )
     subparsers.add_parser("status", help="Comprueba la sesión sin mostrar secretos")
     return parser
 
@@ -49,6 +59,23 @@ def main() -> None:
         return
     if args.command == "status":
         raise SystemExit(asyncio.run(_status()))
+    if args.command == "import-session":
+        cookie = getpass.getpass("Valor de MoodleSession (entrada oculta): ")
+        try:
+            result = asyncio.run(import_session_cookie(Settings.from_env(), cookie))
+        except SessionImportError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.command == "forget-session":
+        try:
+            result = forget_session_cookie()
+        except SessionImportError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     raise SystemExit(2)
 
 

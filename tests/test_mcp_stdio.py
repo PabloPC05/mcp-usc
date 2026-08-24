@@ -37,6 +37,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "get_submission_status",
         "get_work_item",
         "inspect_quiz_attempt",
+        "inspect_submission_status",
         "inspect_discussion_posts",
         "list_announcements",
         "list_assignments",
@@ -67,6 +68,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "preview_delete_personal_calendar_event",
         "preview_finish_quiz",
         "preview_inspect_quiz_attempt",
+        "preview_inspect_submission_status",
         "preview_inspect_discussion_posts",
         "preview_message",
         "preview_remove_submission",
@@ -120,6 +122,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "preview_delete_submission_files",
         "preview_finish_quiz",
         "preview_inspect_quiz_attempt",
+        "preview_inspect_submission_status",
         "preview_inspect_discussion_posts",
         "preview_message",
         "preview_remove_submission",
@@ -135,8 +138,11 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
     assert all(by_name[name].annotations.readOnlyHint is False for name in write_names)
     assert all(by_name[name].annotations.destructiveHint is True for name in write_names)
     assert all(by_name[name].annotations.idempotentHint is False for name in preview_names)
+    stateful_read_names = {"inspect_submission_status"}
+    assert all(by_name[name].annotations.readOnlyHint is False for name in stateful_read_names)
+    assert all(by_name[name].annotations.destructiveHint is False for name in stateful_read_names)
     assert all(
         tool.annotations.readOnlyHint is True
         for name, tool in by_name.items()
-        if name not in write_names
+        if name not in write_names | stateful_read_names
     )

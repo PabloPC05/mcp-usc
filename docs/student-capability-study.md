@@ -8,11 +8,11 @@ académica propia con mínimo privilegio: consultar cursos, agenda, materiales, 
 calificaciones y progreso; y realizar únicamente cambios que el estudiante podría hacer en su
 propia cuenta y contexto.
 
-La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.3 expone
-75 herramientas (39 lecturas, 18 previsualizaciones y 18 operaciones con efecto), añade lecturas de
-alto nivel y un catálogo de 301 funciones externas candidatas: 192 lecturas y 109 acciones. Ese
-catálogo es una lista blanca de estudio, no una promesa de disponibilidad ni una autorización para
-ejecutar todas sus acciones.
+La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.4 expone
+77 herramientas (39 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
+inspección potencialmente *stateful* confirmada), añade lecturas de alto nivel y un catálogo de 301
+funciones externas candidatas: 192 lecturas y 109 acciones. Ese catálogo es una lista blanca de
+estudio, no una promesa de disponibilidad ni una autorización para ejecutar todas sus acciones.
 
 La regla central es:
 
@@ -259,10 +259,11 @@ términos, consentir tratamientos ni tomar decisiones de integridad académica e
   `user/preferences.php`, no del dashboard `/my/`, porque este último registra el evento
   `dashboard_viewed` incluso en GET.
 - **HTML autenticado.** Las páginas `course/view.php`, `mod/*/view.php` y las de foro no se usan como
-  lectura: pueden registrar visitas, marcar elementos como leídos o cambiar la finalización. Los
-  formularios se limitan a operaciones de cuestionario ya confirmadas; las tareas exigen REST.
-- **Archivos.** Los endpoints oficiales de subida y descarga requieren configuración y token; el
-  `filemanager` JavaScript de una sesión no equivale a un campo multipart simple
+  lecturas puras: pueden registrar visitas, marcar elementos como leídos o cambiar la finalización.
+  Solo se abren formularios de tareas o cuestionarios después de una confirmación contextual.
+- **Archivos.** REST usa los endpoints oficiales de subida. La sesión usa únicamente el flujo
+  non-JS de borrador y selector de repositorio que Moodle exponga mediante formularios frescos; si
+  no reconoce ese contrato, falla cerrado
   ([file handling](https://moodledev.io/docs/5.2/apis/subsystems/external/files)).
 - **Cambios de versión.** Una función puede aparecer, cambiar de firma, quedar obsoleta o migrar de
   `externallib.php` a una clase externa. La comprobación de disponibilidad y las pruebas de contrato
