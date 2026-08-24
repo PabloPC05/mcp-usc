@@ -8,13 +8,14 @@ académica propia con mínimo privilegio: consultar cursos, agenda, materiales, 
 calificaciones y progreso; y realizar únicamente cambios que el estudiante podría hacer en su
 propia cuenta y contexto.
 
-La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.8 expone
+La versión 0.2 ya resolvía el núcleo operativo mediante 42 herramientas MCP. La versión 0.9 expone
 84 herramientas (46 lecturas puras, 19 previsualizaciones, 18 operaciones con efecto y una
 inspección potencialmente *stateful* confirmada), añade una descripción autoverificable del
 proyecto, descubrimiento público de titulaciones y materias, lecturas de alto nivel y un catálogo de
 301 funciones externas candidatas: 192 lecturas y 109 acciones. Ese catálogo es una lista blanca de
 estudio, no una promesa de disponibilidad ni una autorización para ejecutar todas sus acciones. La
-[referencia pública](tools.md) enumera el contrato completo.
+[referencia pública](tools.md) enumera el contrato completo; la
+[superficie MCP](mcp-surface.md) añade recursos y prompts sin ampliar permisos.
 
 La regla central es:
 

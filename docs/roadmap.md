@@ -1,11 +1,11 @@
 # Hoja de ruta
 
-## Estado actual: 0.8.x
+## Estado actual: 0.9.x
 
-La serie 0.8 es una beta comunitaria funcional. Tiene un contrato MCP estable dentro de la serie,
-documentación para usuarios y contribuidores, diagnóstico local, CI y un modelo de confirmación
-para cualquier operación con efecto. No se denomina 1.0 porque todavía falta demostrar
-compatibilidad sostenida con más configuraciones reales de Moodle sin depender de una sola cuenta.
+La serie 0.9 es una beta candidata a estabilización. Conserva el contrato de 84 herramientas y
+añade recursos, prompts, manifiesto determinista, CI multiplataforma y releases reproducibles. No se
+denomina 1.0 porque todavía falta demostrar compatibilidad sostenida con más configuraciones reales
+de Moodle y completar una auditoría final sobre el contrato que vaya a declararse estable.
 
 ## Criterios para 1.0.0
 
@@ -23,15 +23,23 @@ La versión 1.0 se publicará cuando se cumplan todos estos criterios:
 - proceso reproducible de release con artefactos, checksums y notas de migración;
 - al menos un ciclo de feedback comunitario sobre nombres, respuestas y ergonomía de herramientas.
 
-## Prioridades candidatas para 0.9
+## Entregado en 0.9
 
-- matriz automatizada de Python y sistemas operativos en CI;
-- exportación de diagnósticos sanitizados para incidencias;
-- fixtures adicionales de Moodle 4.5, 5.0 y 5.2;
+- matriz CI de Python 3.11/3.13 en Linux, Windows y macOS;
+- diagnóstico compacto y manifiesto sanitizado con digest del contrato;
+- recursos MCP pasivos y prompts guiados con límites explícitos;
+- documentación de compatibilidad y degradación para hosts MCP;
+- release automática con verificación de wheel y checksums SHA-256.
+
+## Prioridades antes de 1.0
+
+- fixtures versionados adicionales para respuestas diferenciales de Moodle 4.5, 5.0 y 5.2;
+- validación de mínimo privilegio con más de una instalación/cuenta, sin persistir datos reales;
 - mayor cobertura de calendarios oficiales de otros centros USC cuando exista un vínculo verificable
   entre plan, código de materia y fuente de examen;
-- revisión de accesibilidad y claridad de mensajes de error;
-- documentación de integración verificada para más clientes MCP.
+- revisión de accesibilidad y claridad de errores con feedback comunitario;
+- decisión y prueba de migración al SDK MCP 2 o política explícita de permanencia temporal en 1.x;
+- auditoría final del contrato estable y política formal de deprecaciones.
 
 ## Fuera de alcance
 

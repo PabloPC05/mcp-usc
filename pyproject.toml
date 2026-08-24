@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-usc"
-version = "0.8.0"
+version = "0.9.0"
 description = "Local HTTP-first MCP server for USC Moodle and official academic information"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +25,7 @@ dependencies = [
   "beautifulsoup4>=4.13,<5",
   "httpx>=0.28,<1",
   "keyring>=25.6,<26",
-  "mcp>=1.27,<2",
+  "mcp>=1.29,<2",
   "platformdirs>=4.3,<5",
   "pypdf>=5,<7",
   "tzdata>=2025.2",

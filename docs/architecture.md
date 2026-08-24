@@ -3,6 +3,10 @@
 `mcp-usc` separa el cliente MCP, el proceso local y los sistemas remotos. «HTTP-first» describe la
 conexión del proceso con Moodle/USC; el transporte MCP expuesto al cliente es STDIO.
 
+Desde v0.9 el mismo proceso ofrece los tres bloques estándar de MCP: herramientas activas, recursos
+pasivos y prompts elegidos explícitamente por la persona. Los recursos y prompts incluidos son
+estáticos: construirlos o leerlos no crea un cliente HTTP.
+
 ```mermaid
 flowchart LR
     A[Cliente MCP\nCodex u otro] -->|STDIO local| B[mcp-usc]
@@ -28,6 +32,8 @@ flowchart LR
 | `confirmations.py` | Tokens en memoria, de un solo uso y ligados a usuario/parámetros. |
 | `credentials.py` | Adaptador del almacén seguro del sistema mediante `keyring`. |
 | `diagnostics.py` | Diagnóstico local sin red ni exposición de credenciales. |
+| `experience.py` | Recursos y prompts locales para flujos académicos seguros. |
+| `manifest.py` | Contrato MCP determinista y sanitizado con digest SHA-256. |
 
 ## Selección del transporte privado
 
@@ -90,5 +96,6 @@ La caché solo sirve GET públicos anónimos que han superado validación estric
 ## Pruebas
 
 La suite reemplaza HTTP, keyring, formularios, subidas y descargas con dobles. El test STDIO arranca
-el servidor como lo haría un cliente real, enumera las 84 herramientas y verifica sus anotaciones.
+el servidor como lo haría un cliente real, enumera 84 herramientas, cuatro recursos y cuatro
+prompts, verifica las anotaciones y renderiza ejemplos por el protocolo real.
 La auditoría de la demo oficial de Moodle es opt-in, bloquea comunicaciones y no se ejecuta en CI.

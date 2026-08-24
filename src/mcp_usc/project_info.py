@@ -12,6 +12,20 @@ TOOL_INVENTORY = {
     "stateful_reads": 1,
 }
 
+RESOURCE_URIS = {
+    "about": "usc://about",
+    "safety": "usc://safety",
+    "compatibility": "usc://compatibility",
+    "workflows": "usc://workflows",
+}
+
+PROMPT_NAMES = (
+    "daily_briefing",
+    "exam_planning",
+    "assignment_review",
+    "prepare_assignment_submission",
+)
+
 CAPABILITY_TOOL_GROUPS = {
     "server_and_catalog": (
         "describe_mcp_usc",
@@ -142,6 +156,11 @@ def project_overview() -> dict[str, object]:
         ],
         "tool_groups": {name: list(tools) for name, tools in CAPABILITY_TOOL_GROUPS.items()},
         "tool_inventory": dict(TOOL_INVENTORY),
+        "mcp_surface": {
+            "tools": TOOL_INVENTORY["total"],
+            "resources": dict(RESOURCE_URIS),
+            "prompts": list(PROMPT_NAMES),
+        },
         "transport": {
             "mcp": "STDIO local",
             "campus": "HTTP-first: REST oficial o MoodleSession/AJAX same-origin",
@@ -167,6 +186,8 @@ def project_overview() -> dict[str, object]:
             "getting_started": f"{PROJECT_URL}/blob/main/docs/getting-started.md",
             "tools": f"{PROJECT_URL}/blob/main/docs/tools.md",
             "architecture": f"{PROJECT_URL}/blob/main/docs/architecture.md",
+            "mcp_surface": f"{PROJECT_URL}/blob/main/docs/mcp-surface.md",
+            "compatibility": f"{PROJECT_URL}/blob/main/docs/compatibility.md",
             "security": f"{PROJECT_URL}/blob/main/SECURITY.md",
         },
         "network_contacted": False,

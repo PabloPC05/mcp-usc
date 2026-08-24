@@ -60,7 +60,7 @@ def test_forget_session_cli_reports_local_only_logout(monkeypatch, capsys) -> No
 
 
 def test_doctor_cli_is_offline_and_returns_public_only(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(sys, "argv", ["mcp-usc", "doctor"])
+    monkeypatch.setattr(sys, "argv", ["mcp-usc", "doctor", "--compact"])
     monkeypatch.setattr(
         cli,
         "build_diagnostic",
@@ -75,6 +75,19 @@ def test_doctor_cli_is_offline_and_returns_public_only(monkeypatch, capsys) -> N
         cli.main()
 
     assert exit_info.value.code == 0
-    result = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    result = json.loads(output)
     assert result["campus_contacted"] is False
     assert result["secrets_exposed"] is False
+    assert output.count("\n") == 1
+
+
+def test_manifest_cli_outputs_the_local_contract(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["mcp-usc", "manifest", "--compact"])
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["version"] == "0.9.0"
+    assert result["counts"] == {"tools": 84, "resources": 4, "prompts": 4}
+    assert result["network_contacted"] is False

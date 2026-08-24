@@ -1,8 +1,11 @@
 # Inventario de herramientas MCP
 
-La versión 0.8.0 expone 84 herramientas. Este documento enumera el contrato público completo; el
+La versión 0.9.0 expone 84 herramientas. Este documento enumera el contrato público completo; el
 servidor también lo devuelve agrupado mediante `describe_mcp_usc` y un test lo compara con el
 inventario STDIO real.
+
+Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separado en
+[Superficie MCP](mcp-surface.md); no cambian las herramientas ni sus parámetros.
 
 ## Tipos
 

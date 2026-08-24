@@ -515,7 +515,7 @@ wheels = [
 
 [[package]]
 name = "mcp-usc"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -543,7 +543,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.13,<5" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "keyring", specifier = ">=25.6,<26" },
-    { name = "mcp", specifier = ">=1.27,<2" },
+    { name = "mcp", specifier = ">=1.29,<2" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "playwright", marker = "extra == 'browser-auth'", specifier = ">=1.55,<2" },
     { name = "pypdf", specifier = ">=5,<7" },

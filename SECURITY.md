@@ -8,8 +8,9 @@ sensible y ejecútalo solo en equipos de confianza.
 
 | Versión | Soporte de seguridad |
 | --- | --- |
-| 0.8.x | Sí |
-| 0.7.x y anteriores | Actualiza antes de reportar salvo que el problema también afecte a 0.8.x |
+| 0.9.x | Sí |
+| 0.8.x | Correcciones críticas durante la transición a 0.9 |
+| 0.7.x y anteriores | Actualiza antes de reportar salvo que el problema también afecte a 0.9.x |
 
 Mientras el proyecto sea beta, las correcciones se publicarán en la última serie menor.
 

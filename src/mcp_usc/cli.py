@@ -30,10 +30,16 @@ def _parser() -> argparse.ArgumentParser:
         help="Elimina la cookie local sin cerrar la sesión remota",
     )
     subparsers.add_parser("status", help="Comprueba la sesión sin mostrar secretos")
-    subparsers.add_parser(
+    doctor = subparsers.add_parser(
         "doctor",
         help="Diagnostica la configuración local sin contactar con el Campus ni mostrar secretos",
     )
+    doctor.add_argument("--compact", action="store_true", help="Emite JSON en una sola línea")
+    manifest = subparsers.add_parser(
+        "manifest",
+        help="Exporta el contrato MCP local, sus esquemas y un SHA-256 sin usar la red",
+    )
+    manifest.add_argument("--compact", action="store_true", help="Emite JSON en una sola línea")
     return parser
 
 
@@ -45,6 +51,13 @@ async def _status() -> int:
         return 1
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0
+
+
+def _print_json(value: object, *, compact: bool = False) -> None:
+    if compact:
+        print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        return
+    print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
@@ -66,9 +79,14 @@ def main() -> None:
         raise SystemExit(asyncio.run(_status()))
     if args.command == "doctor":
         result = build_diagnostic()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _print_json(result, compact=args.compact)
         failed = result["status"] in {"configuration_error", "unsupported_python"}
         raise SystemExit(1 if failed else 0)
+    if args.command == "manifest":
+        from .manifest import build_manifest
+
+        _print_json(asyncio.run(build_manifest()), compact=args.compact)
+        return
     if args.command == "import-session":
         cookie = getpass.getpass("Valor de MoodleSession (entrada oculta): ")
         try:

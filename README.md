@@ -30,20 +30,24 @@ consulta correo ni Teams, no eleva privilegios y no actúa como profesorado o ad
 
 ## Estado del proyecto
 
-La versión **0.8.0** es una beta comunitaria: expone **84 herramientas MCP** (46 lecturas puras,
-19 previsualizaciones, 18 operaciones con efecto y una inspección potencialmente stateful). El
-catálogo interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no
-significa que la USC o el token de cada persona habiliten todas ellas.
+La versión **0.9.0** es una beta comunitaria: expone **84 herramientas MCP**, cuatro recursos
+pasivos y cuatro prompts guiados. Las herramientas se dividen en 46 lecturas puras, 19
+previsualizaciones, 18 operaciones con efecto y una inspección potencialmente stateful. El catálogo
+interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no significa
+que la USC o el token de cada persona habiliten todas ellas.
 
-Dos puntos de entrada ayudan a entender y comprobar la instalación sin contactar con el Campus:
+Tres puntos de entrada ayudan a entender y comprobar la instalación sin contactar con el Campus:
 
 ```powershell
 uv run mcp-usc doctor
+uv run mcp-usc manifest --compact
 ```
 
 - `describe_mcp_usc`: explica al cliente MCP el propósito, alcance, límites y modelo de seguridad.
 - `mcp-usc doctor`: revisa Python, autenticación configurada, keyring y carpeta de subidas; solo
   muestra presencia/estado, nunca valores secretos.
+- `mcp-usc manifest`: exporta esquemas de herramientas, recursos y prompts con un SHA-256
+  determinista; tampoco usa la red.
 
 Para validar de verdad un token o una sesión mediante una lectura HTTP usa después
 `uv run mcp-usc status`.
@@ -52,6 +56,8 @@ Para validar de verdad un token o una sesión mediante una lectura HTTP usa desp
 
 - [Primeros pasos](docs/getting-started.md): instalación, autenticación y conexión con un cliente.
 - [Inventario de herramientas](docs/tools.md): las 84 herramientas, tipos y requisitos.
+- [Superficie MCP](docs/mcp-surface.md): recursos, prompts y manifiesto local.
+- [Compatibilidad](docs/compatibility.md): sistemas, Python, hosts y transportes Moodle.
 - [Arquitectura](docs/architecture.md): transportes, componentes y fronteras de confianza.
 - [Modelo de seguridad](SECURITY.md): credenciales, confirmaciones y reporte responsable.
 - [Estudio de capacidades](docs/student-capability-study.md): análisis detallado de Moodle.
@@ -243,7 +249,7 @@ herramientas:
 - `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
   incluidos los ocultos del tablero.
 
-La versión 0.8 conserva la resolución específica del doble grado y la búsqueda independiente
+La versión 0.9 conserva la resolución específica del doble grado y la búsqueda independiente
 en todos los grados actuales. En la comprobación real de 2026/2027 se procesaron las 65 entradas del
 catálogo, incluidas materias repetidas por itinerarios y códigos oficiales con sufijo como
 `G3131324B`. Las repeticiones solo se fusionan si código y título coinciden exactamente, y se
@@ -321,7 +327,7 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.8.0 expone 84 herramientas: 46 lecturas puras, 19 previsualizaciones, 18 operaciones con
+La versión 0.9.0 expone 84 herramientas: 46 lecturas puras, 19 previsualizaciones, 18 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
 [inventario completo](docs/tools.md) y el
 [estudio de capacidades](docs/student-capability-study.md) explican las fronteras de seguridad y
@@ -480,6 +486,9 @@ reinicia cada hora.
 
 El contrato se contrastó con documentación y código oficial:
 
+- [Conceptos de servidores MCP](https://modelcontextprotocol.io/docs/learn/server-concepts), incluidos
+  tools, resources y prompts, y
+  [SDK oficial de Python 1.x](https://py.sdk.modelcontextprotocol.io/v1/).
 - [External Services de Moodle](https://moodledev.io/docs/4.5/apis/subsystems/external) y sus
   [recomendaciones de seguridad](https://moodledev.io/docs/4.5/apis/subsystems/external/security).
 - Definiciones Moodle 4.5 de

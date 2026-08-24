@@ -51,6 +51,17 @@ posterior y usa Ruff para formato/imports estáticos y pytest para el contrato.
 - cubre éxito, permisos, entrada inválida, timeout/resultado ambiguo y ausencia de secretos;
 - ejecuta el test STDIO: detecta automáticamente divergencias entre el inventario declarado y real.
 
+Los recursos deben ser pasivos y no contactar con el Campus salvo que su URI y documentación lo
+declaren inequívocamente; los recursos `usc://` actuales son totalmente locales. Los prompts son
+plantillas controladas por el usuario: no conceden permisos, no ejecutan herramientas por sí mismos
+y deben conservar el flujo preview/confirmación. Actualiza `docs/mcp-surface.md` al modificarlos.
+
+## Releases
+
+El procedimiento reproducible está en [docs/releasing.md](docs/releasing.md). Un tag `vX.Y.Z`
+dispara tests, build, instalación limpia del wheel, checksums SHA-256 y publicación en GitHub. No
+muevas ni reutilices un tag publicado.
+
 ## Pruebas con servicios externos
 
 La suite normal y CI no deben contactar con la USC ni realizar escrituras externas. Usa `respx`,

@@ -1,7 +1,9 @@
+import json
 import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import AnyUrl
 
 from mcp_usc.project_info import CAPABILITY_TOOL_GROUPS, TOOL_INVENTORY
 
@@ -166,3 +168,37 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         for name, tool in by_name.items()
         if name not in write_names | stateful_read_names
     )
+
+
+async def test_stdio_server_advertises_and_renders_resources_and_prompts() -> None:
+    parameters = StdioServerParameters(command=sys.executable, args=["-m", "mcp_usc", "serve"])
+    async with (
+        stdio_client(parameters) as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream) as session,
+    ):
+        await session.initialize()
+        resources = await session.list_resources()
+        prompts = await session.list_prompts()
+        about = await session.read_resource(AnyUrl("usc://about"))
+        briefing = await session.get_prompt(
+            "daily_briefing",
+            {"days": "14", "include_archived": "false"},
+        )
+
+    assert {str(item.uri) for item in resources.resources} == {
+        "usc://about",
+        "usc://compatibility",
+        "usc://safety",
+        "usc://workflows",
+    }
+    assert {item.name for item in prompts.prompts} == {
+        "assignment_review",
+        "daily_briefing",
+        "exam_planning",
+        "prepare_assignment_submission",
+    }
+    about_payload = json.loads(about.contents[0].text)
+    assert about_payload["version"] == "0.9.0"
+    assert about_payload["network_contacted"] is False
+    assert "14 días" in briefing.messages[0].content.text
+    assert "No llames previews" in briefing.messages[0].content.text

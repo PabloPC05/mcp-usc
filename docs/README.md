@@ -4,6 +4,8 @@
 
 - [Primeros pasos](getting-started.md): instalación, autenticación y conexión MCP.
 - [Herramientas](tools.md): contrato completo de las 84 herramientas.
+- [Superficie MCP](mcp-surface.md): recursos, prompts y manifiesto.
+- [Compatibilidad](compatibility.md): sistemas, Python, hosts y Moodle.
 - [Arquitectura](architecture.md): componentes, transportes y confirmaciones.
 - [Soporte](../SUPPORT.md): diagnóstico y datos seguros para informar de un problema.
 
@@ -19,6 +21,8 @@
 
 - [Hoja de ruta hacia 1.0](roadmap.md).
 - [Notas de v0.8.0](releases/v0.8.0.md).
+- [Notas de v0.9.0](releases/v0.9.0.md).
+- [Proceso reproducible de release](releasing.md).
 - [Changelog](../CHANGELOG.md).
 - [Guía de contribución](../CONTRIBUTING.md).
 

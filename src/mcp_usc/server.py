@@ -14,6 +14,17 @@ from mcp.types import ToolAnnotations  # noqa: E402
 
 from .degree_catalog import USC_DEGREE_CATALOG_URL  # noqa: E402
 from .exam_catalog import DEGREE_EXAM_PROFILES, OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
+from .experience import (  # noqa: E402
+    assignment_review_prompt as build_assignment_review_prompt,
+)
+from .experience import (  # noqa: E402
+    compatibility_overview,
+    daily_briefing_prompt,
+    exam_planning_prompt,
+    prepare_assignment_submission_prompt,
+    safety_guide,
+    workflow_catalog,
+)
 from .project_info import project_overview  # noqa: E402
 from .public_http_cache import PublicHttpCache  # noqa: E402
 from .service import UscService  # noqa: E402
@@ -91,6 +102,88 @@ def _service() -> UscService:
         settings.public_cache_max_total_bytes,
     )
     return UscService(settings, public_http_cache=public_cache)
+
+
+@mcp.resource(
+    "usc://about",
+    name="mcp_usc_about",
+    title="Acerca de mcp-usc",
+    description="Propósito, alcance, límites e inventario del servidor; contenido local sin red.",
+    mime_type="application/json",
+)
+def about_resource() -> dict:
+    return project_overview()
+
+
+@mcp.resource(
+    "usc://safety",
+    name="mcp_usc_safety",
+    title="Contrato de seguridad",
+    description="Reglas invariantes para lecturas, confirmaciones, secretos y contenido remoto.",
+    mime_type="text/markdown",
+)
+def safety_resource() -> str:
+    return safety_guide()
+
+
+@mcp.resource(
+    "usc://compatibility",
+    name="mcp_usc_compatibility",
+    title="Compatibilidad",
+    description="Matriz local de protocolo, Python, sistemas operativos y transportes Moodle.",
+    mime_type="application/json",
+)
+def compatibility_resource() -> dict:
+    return compatibility_overview()
+
+
+@mcp.resource(
+    "usc://workflows",
+    name="mcp_usc_workflows",
+    title="Flujos guiados",
+    description="Catálogo local de prompts y sus efectos; no ejecuta ninguna herramienta.",
+    mime_type="application/json",
+)
+def workflows_resource() -> dict:
+    return workflow_catalog()
+
+
+@mcp.prompt(
+    name="daily_briefing",
+    title="Resumen académico",
+    description="Prioriza pendientes, calendario, avisos y notificaciones mediante lecturas puras.",
+)
+def daily_briefing(days: int = 7, include_archived: bool = False) -> str:
+    return daily_briefing_prompt(days, include_archived)
+
+
+@mcp.prompt(
+    name="exam_planning",
+    title="Planificar exámenes",
+    description="Construye un calendario de exámenes con curso y fuentes oficiales explícitos.",
+)
+def exam_planning(academic_year: str) -> str:
+    return exam_planning_prompt(academic_year)
+
+
+@mcp.prompt(
+    name="assignment_review",
+    title="Revisar tareas",
+    description="Resume tareas y entregas sin abrir páginas potencialmente stateful.",
+)
+def assignment_review(course_query: str = "", days: int = 60) -> str:
+    return build_assignment_review_prompt(course_query, days)
+
+
+@mcp.prompt(
+    name="prepare_assignment_submission",
+    title="Preparar una entrega",
+    description="Guía una previsualización de entrega y obliga a detenerse antes del efecto.",
+)
+def prepare_assignment_submission(
+    assignment_id: int, intended_change: str = "revisar la entrega"
+) -> str:
+    return prepare_assignment_submission_prompt(assignment_id, intended_change)
 
 
 @mcp.tool(annotations=READ_ONLY)

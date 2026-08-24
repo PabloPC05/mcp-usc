@@ -19,11 +19,16 @@ git clone https://github.com/PabloPC05/mcp-usc.git
 cd mcp-usc
 uv sync
 uv run mcp-usc doctor
+uv run mcp-usc manifest --compact
 ```
 
 `doctor` es completamente local. Informa de si hay un token o una sesión almacenados, pero nunca
 muestra su valor y no contacta con el Campus. Un estado `public_only` es válido: significa que las
 herramientas públicas están listas y falta configurar acceso privado.
+
+`manifest` también es local y exporta el contrato exacto que verá un cliente: 84 herramientas,
+cuatro recursos, cuatro prompts y un SHA-256 determinista. Sirve para diagnóstico y revisión sin
+arrancar una conexión con Moodle.
 
 Para desarrollar o ejecutar la suite completa:
 
@@ -128,6 +133,10 @@ Empieza con peticiones que no escriben:
 - «Lista mis asignaturas, incluidas las archivadas.»
 - «Dime qué trabajos tengo pendientes en los próximos 14 días.»
 - «Busca las fechas oficiales de mis exámenes para 2026/2027 y cita las fuentes.»
+
+Si el cliente muestra prompts MCP, también puedes elegir **Resumen académico**, **Planificar
+exámenes**, **Revisar tareas** o **Preparar una entrega**. El último flujo se detiene obligatoriamente
+después del preview; seleccionarlo no confirma ni ejecuta una entrega.
 
 Una operación con efecto debe aparecer siempre en dos pasos: primero una herramienta `preview_*` y,
 tras una confirmación nueva sobre los parámetros exactos, la herramienta final. No aceptes una
