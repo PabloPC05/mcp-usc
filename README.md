@@ -1,14 +1,62 @@
 # mcp-usc
 
-Servidor MCP local y HTTP-first para el Campus Virtual Moodle de la Universidade de Santiago de
-Compostela. Permite consultar cursos, calendario, mensajes, foros, materiales, tareas y
-cuestionarios, además de buscar fechas de examen en páginas y PDF oficiales de la USC.
+[![CI](https://github.com/PabloPC05/mcp-usc/actions/workflows/ci.yml/badge.svg)](https://github.com/PabloPC05/mcp-usc/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-La versión 0.7.0 descubre por HTTP el catálogo público completo de grados de la USC, localiza códigos
-de materia en sus planes oficiales y añade caché/revalidación segura con detección explícita de
-cambios de esquema. Mantiene las 301 capacidades Moodle estudiadas: 192 lecturas permitidas y 109
-acciones identificadas. Toda operación con efecto exige previsualización, token de un solo uso y
-aprobación del cliente MCP.
+Tu Campus Virtual de la USC, accesible desde un asistente compatible con MCP.
+
+`mcp-usc` es un servidor local y HTTP-first para alumnado de la Universidade de Santiago de
+Compostela. Permite que un asistente consulte el Campus Virtual Moodle y fuentes académicas
+públicas de la USC, siempre con los permisos de tu propia cuenta.
+
+> [!IMPORTANT]
+> Este es un proyecto comunitario independiente. No está desarrollado, respaldado ni operado por
+> la USC. Tus credenciales se guardan localmente y nunca deben publicarse en GitHub.
+
+## Qué puedes pedirle
+
+| Necesidad | Ejemplo de petición |
+| --- | --- |
+| Organizar el trabajo | «¿Qué tareas tengo pendientes esta semana?» |
+| Seguir una asignatura | «Resume los avisos recientes de AED y enséñame sus materiales.» |
+| Revisar entregas | «¿Qué archivos entregué y qué feedback recibí?» |
+| Preparar exámenes | «¿Cuándo son mis exámenes oficiales del curso 2026/2027?» |
+| Consultar actividad | «Enséñame mis notas, calendario, mensajes y progreso.» |
+| Actuar con aprobación | «Prepara esta entrega, pero no la envíes hasta que la confirme.» |
+
+También cubre foros, actividades Choice, cuestionarios, borradores y descargas de recursos. No
+consulta correo ni Teams, no eleva privilegios y no actúa como profesorado o administración.
+
+## Estado del proyecto
+
+La versión **0.8.0** es una beta comunitaria: expone **84 herramientas MCP** (46 lecturas puras,
+19 previsualizaciones, 18 operaciones con efecto y una inspección potencialmente stateful). El
+catálogo interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no
+significa que la USC o el token de cada persona habiliten todas ellas.
+
+Dos puntos de entrada ayudan a entender y comprobar la instalación sin contactar con el Campus:
+
+```powershell
+uv run mcp-usc doctor
+```
+
+- `describe_mcp_usc`: explica al cliente MCP el propósito, alcance, límites y modelo de seguridad.
+- `mcp-usc doctor`: revisa Python, autenticación configurada, keyring y carpeta de subidas; solo
+  muestra presencia/estado, nunca valores secretos.
+
+Para validar de verdad un token o una sesión mediante una lectura HTTP usa después
+`uv run mcp-usc status`.
+
+## Documentación
+
+- [Primeros pasos](docs/getting-started.md): instalación, autenticación y conexión con un cliente.
+- [Inventario de herramientas](docs/tools.md): las 84 herramientas, tipos y requisitos.
+- [Arquitectura](docs/architecture.md): transportes, componentes y fronteras de confianza.
+- [Modelo de seguridad](SECURITY.md): credenciales, confirmaciones y reporte responsable.
+- [Estudio de capacidades](docs/student-capability-study.md): análisis detallado de Moodle.
+- [Hoja de ruta](docs/roadmap.md): alcance de la beta y criterios para llegar a 1.0.
+- [Cómo contribuir](CONTRIBUTING.md) y [cambios por versión](CHANGELOG.md).
 
 ## Principios de diseño
 
@@ -195,7 +243,7 @@ herramientas:
 - `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
   incluidos los ocultos del tablero.
 
-La versión 0.7 conserva la resolución específica del doble grado y añade una búsqueda independiente
+La versión 0.8 conserva la resolución específica del doble grado y la búsqueda independiente
 en todos los grados actuales. En la comprobación real de 2026/2027 se procesaron las 65 entradas del
 catálogo, incluidas materias repetidas por itinerarios y códigos oficiales con sufijo como
 `G3131324B`. Las repeticiones solo se fusionan si código y título coinciden exactamente, y se
@@ -273,10 +321,11 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.7.0 expone 83 herramientas: 45 lecturas puras, 19 previsualizaciones, 18 operaciones con
+La versión 0.8.0 expone 84 herramientas: 46 lecturas puras, 19 previsualizaciones, 18 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
-[estudio completo de capacidades](docs/student-capability-study.md) explica el inventario, las
-fronteras de seguridad y las diferencias entre Moodle 4.5 y 5.2.
+[inventario completo](docs/tools.md) y el
+[estudio de capacidades](docs/student-capability-study.md) explican las fronteras de seguridad y
+las diferencias entre Moodle 4.5 y 5.2.
 
 | Grupo | Lectura pura | Confirmación previa | Operación confirmada |
 | --- | --- | --- | --- |

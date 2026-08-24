@@ -7,6 +7,7 @@ import json
 import sys
 
 from .campus import CampusError, interactive_login
+from .diagnostics import build_diagnostic
 from .service import UscService
 from .session_auth import SessionImportError, forget_session_cookie, import_session_cookie
 from .settings import Settings
@@ -29,6 +30,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Elimina la cookie local sin cerrar la sesión remota",
     )
     subparsers.add_parser("status", help="Comprueba la sesión sin mostrar secretos")
+    subparsers.add_parser(
+        "doctor",
+        help="Diagnostica la configuración local sin contactar con el Campus ni mostrar secretos",
+    )
     return parser
 
 
@@ -59,6 +64,11 @@ def main() -> None:
         return
     if args.command == "status":
         raise SystemExit(asyncio.run(_status()))
+    if args.command == "doctor":
+        result = build_diagnostic()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        failed = result["status"] in {"configuration_error", "unsupported_python"}
+        raise SystemExit(1 if failed else 0)
     if args.command == "import-session":
         cookie = getpass.getpass("Valor de MoodleSession (entrada oculta): ")
         try:

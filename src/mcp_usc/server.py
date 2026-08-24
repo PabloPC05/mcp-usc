@@ -14,12 +14,14 @@ from mcp.types import ToolAnnotations  # noqa: E402
 
 from .degree_catalog import USC_DEGREE_CATALOG_URL  # noqa: E402
 from .exam_catalog import DEGREE_EXAM_PROFILES, OFFICIAL_EXAM_CALENDAR_URLS  # noqa: E402
+from .project_info import project_overview  # noqa: E402
 from .public_http_cache import PublicHttpCache  # noqa: E402
 from .service import UscService  # noqa: E402
 from .settings import Settings  # noqa: E402
 
 INSTRUCTIONS = (
-    "Servidor local para la USC. Usa primero auth_status. Las herramientas list/get/search/read "
+    "Servidor local para la USC. Usa describe_mcp_usc para explicar alcance y límites, y después "
+    "auth_status para comprobar acceso privado. Las herramientas list/get/search/read "
     "son de solo lectura. Mensajes, entregas y cuestionarios tienen escrituras separadas. Nunca "
     "llames una escritura hasta mostrar su preview y recibir en un mensaje nuevo la confirmación "
     "del usuario para esos parámetros exactos. No solicita credenciales ni modifica matrículas. "
@@ -89,6 +91,12 @@ def _service() -> UscService:
         settings.public_cache_max_total_bytes,
     )
     return UscService(settings, public_http_cache=public_cache)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def describe_mcp_usc() -> dict:
+    """Explica para qué sirve este MCP, sus límites y su modelo de seguridad, sin usar la red."""
+    return project_overview()
 
 
 @mcp.tool(annotations=READ_ONLY)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from mcp_usc import cli
 
 
@@ -55,3 +57,24 @@ def test_forget_session_cli_reports_local_only_logout(monkeypatch, capsys) -> No
     result = json.loads(capsys.readouterr().out)
     assert result["local_session_removed"] is True
     assert result["remote_session_unchanged"] is True
+
+
+def test_doctor_cli_is_offline_and_returns_public_only(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["mcp-usc", "doctor"])
+    monkeypatch.setattr(
+        cli,
+        "build_diagnostic",
+        lambda: {
+            "status": "public_only",
+            "campus_contacted": False,
+            "secrets_exposed": False,
+        },
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    assert exit_info.value.code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["campus_contacted"] is False
+    assert result["secrets_exposed"] is False

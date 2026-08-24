@@ -1,0 +1,63 @@
+name: Error reproducible
+description: Informa de un fallo sin incluir credenciales ni datos personales.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por ayudar. No pegues MoodleSession, tokens, sesskey, nombres, mensajes,
+        calificaciones, entregas ni capturas del Campus con datos reales.
+  - type: input
+    id: version
+    attributes:
+      label: Versión o commit
+      placeholder: 0.8.0 o SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Sistema y Python
+      placeholder: Windows 11, Python 3.13
+    validations:
+      required: true
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Modo de acceso
+      options:
+        - Consulta pública sin autenticación
+        - MoodleSession por HTTP
+        - Token REST legítimo
+        - No lo sé
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Qué ocurrió
+      description: Describe resultado esperado y real con datos anonimizados.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproducción mínima
+      description: Incluye herramienta y parámetros sintéticos, nunca secretos o datos reales.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnóstico local opcional
+      description: Salida revisada de `mcp-usc doctor`; no adjuntes otras respuestas privadas.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacidad
+      options:
+        - label: He retirado credenciales y datos personales o académicos reales.
+          required: true
+        - label: El informe no describe una vulnerabilidad explotable (usaré Security si lo hace).
+          required: true

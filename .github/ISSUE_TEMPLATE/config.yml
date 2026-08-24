@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Vulnerabilidad de seguridad
+    url: https://github.com/PabloPC05/mcp-usc/security
+    about: Usa el informe privado; nunca publiques exploits, credenciales o datos del Campus.
+  - name: Guía de soporte
+    url: https://github.com/PabloPC05/mcp-usc/blob/main/SUPPORT.md
+    about: Revisa diagnóstico, límites y datos seguros para una incidencia.

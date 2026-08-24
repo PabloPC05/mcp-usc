@@ -3,6 +3,8 @@ import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from mcp_usc.project_info import CAPABILITY_TOOL_GROUPS, TOOL_INVENTORY
+
 
 async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> None:
     parameters = StdioServerParameters(command=sys.executable, args=["-m", "mcp_usc", "serve"])
@@ -23,6 +25,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "create_personal_calendar_event",
         "delete_personal_calendar_event",
         "delete_submission_files",
+        "describe_mcp_usc",
         "finish_quiz",
         "execute_student_action",
         "get_my_completion",
@@ -100,6 +103,11 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "submit_choice_response",
     }
     by_name = {tool.name: tool for tool in response.tools}
+    assert len(response.tools) == 84
+    documented_names = {
+        name for group_names in CAPABILITY_TOOL_GROUPS.values() for name in group_names
+    }
+    assert documented_names == names
     write_names = {
         "cancel_choice_response",
         "create_forum_discussion",
@@ -145,6 +153,12 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
     assert all(by_name[name].annotations.destructiveHint is True for name in write_names)
     assert all(by_name[name].annotations.idempotentHint is False for name in preview_names)
     stateful_read_names = {"inspect_submission_status"}
+    assert len(write_names) == TOOL_INVENTORY["effects"]
+    assert len(preview_names) == TOOL_INVENTORY["previews"]
+    assert len(stateful_read_names) == TOOL_INVENTORY["stateful_reads"]
+    assert len(names - write_names - preview_names - stateful_read_names) == TOOL_INVENTORY[
+        "read_only"
+    ]
     assert all(by_name[name].annotations.readOnlyHint is False for name in stateful_read_names)
     assert all(by_name[name].annotations.destructiveHint is False for name in stateful_read_names)
     assert all(

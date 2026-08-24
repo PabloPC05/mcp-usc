@@ -1,0 +1,47 @@
+name: Nueva capacidad
+description: Propón un caso de uso estudiantil y su contrato HTTP verificable.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Caso de uso
+      description: ¿Qué necesita hacer o conocer el alumno?
+    validations:
+      required: true
+  - type: textarea
+    id: http_contract
+    attributes:
+      label: API o flujo HTTP disponible
+      description: Documentación oficial, función Moodle o formulario; no incluyas credenciales.
+    validations:
+      required: true
+  - type: dropdown
+    id: effect
+    attributes:
+      label: Efecto remoto
+      options:
+        - Lectura pura
+        - Lectura potencialmente stateful
+        - Escritura reversible
+        - Escritura irreversible
+        - No lo sé
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Riesgos y confirmación
+      description: Audiencia, propietario, notificaciones, timeouts o cambios de estado posibles.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Alcance
+      options:
+        - label: La propuesta es para una cuenta de alumno y no requiere elevar permisos.
+          required: true
+        - label: No he incluido datos personales, material privado ni credenciales.
+          required: true
