@@ -16,6 +16,7 @@
 - [Revisión de seguridad HTTP/sesión](security-http-session-review-2026-08-24.md).
 - [Revisión diferencial de v0.7](differential-review-v0.7.0.md).
 - [Revisión de release v0.8](release-review-v0.8.0.md).
+- [Revisión de release v0.9](release-review-v0.9.0.md).
 
 ## Proyecto y releases
 
