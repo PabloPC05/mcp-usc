@@ -1,9 +1,27 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "app.py": {
+    "api/index.py": {
       "maxDuration": 60,
       "excludeFiles": "{tests/**,docs/**,audit-context/**,.github/**}"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/healthz",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/mcp/",
+      "destination": "/api/index"
+    }
+  ]
 }
