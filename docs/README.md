@@ -3,6 +3,7 @@
 ## Para empezar
 
 - [Primeros pasos](getting-started.md): instalación, autenticación y conexión MCP.
+- [Despliegue privado en Vercel](vercel.md): Streamable HTTP, secretos y despliegue desde `main`.
 - [Herramientas](tools.md): contrato completo de las 91 herramientas.
 - [Superficie MCP](mcp-surface.md): recursos, prompts y manifiesto.
 - [Compatibilidad](compatibility.md): sistemas, Python, hosts y Moodle.
