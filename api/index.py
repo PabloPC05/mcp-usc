@@ -11,8 +11,12 @@ _SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
+# Vercel exposes only /tmp as a writable filesystem. platformdirs reads
+# XDG_DATA_HOME when Settings builds the optional browser/data paths.
+os.environ.setdefault("XDG_DATA_HOME", "/tmp")
+
 _DEFAULT_AUTH_TOKEN_SHA256 = (
-    "ad18c4922180b35863a971e4aaab3c7b5f49805fb1a0fe1abfba8e49874f86d7"
+    "2995f423a6b73030e212e73038029b65e22fd292536ed3e166f106c25a1661e1"
 )
 os.environ.setdefault("MCP_AUTH_TOKEN_SHA256", _DEFAULT_AUTH_TOKEN_SHA256)
 
