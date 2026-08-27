@@ -65,6 +65,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.vercel]
-entrypoint = "app:app"
