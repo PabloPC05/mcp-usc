@@ -32,7 +32,10 @@ def _configured_auth_verifier() -> AuthVerifier | None:
         return ("plain", token)
 
     token_digest = os.getenv("MCP_AUTH_TOKEN_SHA256", "").strip().casefold()
-    if len(token_digest) == 64 and all(character in "0123456789abcdef" for character in token_digest):
+    is_valid_digest = len(token_digest) == 64 and all(
+        character in "0123456789abcdef" for character in token_digest
+    )
+    if is_valid_digest:
         return ("sha256", token_digest)
     return None
 
