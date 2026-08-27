@@ -9,19 +9,19 @@
   "rewrites": [
     {
       "source": "/",
-      "destination": "/api/index"
+      "destination": "/api/index?__mcp_usc_route=root"
     },
     {
       "source": "/healthz",
-      "destination": "/api/index"
+      "destination": "/api/index?__mcp_usc_route=healthz"
     },
     {
       "source": "/mcp",
-      "destination": "/api/index"
+      "destination": "/api/index?__mcp_usc_route=mcp"
     },
     {
       "source": "/mcp/",
-      "destination": "/api/index"
+      "destination": "/api/index?__mcp_usc_route=mcp"
     }
   ]
 }
