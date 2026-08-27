@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -9,6 +10,11 @@ from starlette.types import Receive, Scope, Send
 _SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
+
+_DEFAULT_AUTH_TOKEN_SHA256 = (
+    "ad18c4922180b35863a971e4aaab3c7b5f49805fb1a0fe1abfba8e49874f86d7"
+)
+os.environ.setdefault("MCP_AUTH_TOKEN_SHA256", _DEFAULT_AUTH_TOKEN_SHA256)
 
 from mcp_usc.vercel_app import app as _mcp_app  # noqa: E402
 

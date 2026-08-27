@@ -8,6 +8,7 @@ from pathlib import Path
 from platformdirs import user_data_path
 
 from .academic_profile import AcademicProfile, load_academic_profile
+from .request_credentials import current_moodle_token
 from .security import validate_usc_url
 
 
@@ -35,7 +36,7 @@ class Settings:
     def from_env(cls) -> Settings:
         data_dir = Path(user_data_path("mcp-usc", appauthor=False, ensure_exists=True))
         profile = Path(os.getenv("USC_BROWSER_PROFILE", data_dir / "browser-profile"))
-        token = os.getenv("USC_MOODLE_TOKEN") or None
+        token = current_moodle_token() or os.getenv("USC_MOODLE_TOKEN") or None
         token_file = os.getenv("USC_MOODLE_TOKEN_FILE")
         if not token and token_file:
             token = Path(token_file).expanduser().read_text(encoding="utf-8").strip() or None
