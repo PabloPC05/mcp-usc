@@ -16,7 +16,7 @@ if str(_SRC_ROOT) not in sys.path:
 os.environ.setdefault("XDG_DATA_HOME", "/tmp")
 
 _DEFAULT_AUTH_TOKEN_SHA256 = (
-    "2995f423a6b73030e212e73038029b65e22fd292536ed3e166f106c25a1661e1"
+    "a0b1dcd52f59c6d84cd49ada3bdbb4be7c7428ae1a1d9cedba91dbdd8461c294"
 )
 os.environ.setdefault("MCP_AUTH_TOKEN_SHA256", _DEFAULT_AUTH_TOKEN_SHA256)
 
