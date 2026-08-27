@@ -1,0 +1,33 @@
+name: USC Friday Labs Analysis Fast
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/analyse_friday_labs_fast.py'
+      - '.github/workflows/timetable-analysis-fast.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  analyse-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --frozen --extra dev
+      - name: Query USC through MCP concurrently
+        run: uv run --frozen python .github/scripts/analyse_friday_labs_fast.py
+      - name: Upload analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usc-friday-labs-fast
+          path: |
+            usc-friday-labs-fast.json
+            usc-friday-labs-fast-summary.json
+          if-no-files-found: warn
