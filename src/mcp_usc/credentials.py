@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import keyring
 from keyring.errors import KeyringError
 
 SERVICE_NAME = "mcp-usc"
+_ENVIRONMENT_CREDENTIALS = {
+    "moodle-session": "USC_MOODLE_SESSION",
+}
 
 
 class CredentialStoreError(RuntimeError):
@@ -14,11 +18,16 @@ class CredentialStoreError(RuntimeError):
 
 @dataclass(slots=True)
 class CredentialStore:
-    """Small adapter over the operating-system credential store."""
+    """Small adapter over environment secrets and the OS credential store."""
 
     service_name: str = SERVICE_NAME
 
     def get(self, name: str) -> str | None:
+        environment_name = _ENVIRONMENT_CREDENTIALS.get(name)
+        if environment_name:
+            environment_value = os.getenv(environment_name, "").strip()
+            if environment_value:
+                return environment_value
         try:
             return keyring.get_password(self.service_name, name)
         except KeyringError as exc:
