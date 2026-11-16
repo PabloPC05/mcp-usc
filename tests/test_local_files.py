@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,15 @@ def test_rejects_case_insensitive_duplicate_filenames(tmp_path: Path) -> None:
         inspect_upload_files(_settings(tmp_path), ["a/Report.PDF", "b/report.pdf"])
 
 
+@pytest.mark.parametrize("name", ["bad\x07name.txt", "a:b.txt", "a\\b.txt", "..", "x" * 256])
+def test_filename_rules_match_what_moodle_uploads_refuse(name: str) -> None:
+    from mcp_usc.local_files import _validate_filename
+
+    with pytest.raises(ValueError, match="nombre del archivo no es válido"):
+        _validate_filename(name)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot create these file names")
 def test_rejects_filenames_moodle_uploads_would_refuse(tmp_path: Path) -> None:
     bad = tmp_path / "bad\x07name.txt"
     bad.write_bytes(b"x")
