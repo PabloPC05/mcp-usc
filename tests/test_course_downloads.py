@@ -247,7 +247,7 @@ async def test_preview_downloads_nothing_and_warns_about_recorded_views(
 
     assert preview["count"] == 2
     assert preview["records_views"] is True
-    assert preview["folder"].endswith("descargas/Redes")
+    assert Path(preview["folder"]).parts[-2:] == ("descargas", "Redes")
     assert preview["not_downloadable"] == {"url": 3}
     assert download_service._campus().opened == []  # type: ignore[attr-defined]
     assert not (tmp_path / "descargas").exists()
