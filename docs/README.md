@@ -4,7 +4,7 @@
 
 - [Primeros pasos](getting-started.md): instalación, autenticación y conexión MCP.
 - [Servirlo por HTTP](deployment.md): servidor propio, contenedor o Vercel, con token.
-- [Herramientas](tools.md): contrato completo de las 92 herramientas.
+- [Herramientas](tools.md): contrato completo de las 94 herramientas.
 - [Superficie MCP](mcp-surface.md): recursos, prompts y manifiesto.
 - [Compatibilidad](compatibility.md): sistemas, Python, hosts y Moodle.
 - [Cobertura de exámenes oficiales](official-exam-coverage.md): requisitos para ampliar centros sin inferencias.

@@ -79,6 +79,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Exporta el contrato MCP local, sus esquemas y un SHA-256 sin usar la red",
     )
     manifest.add_argument("--compact", action="store_true", help="Emite JSON en una sola línea")
+    from .cli_commands import add_parsers
+
+    add_parsers(subparsers)
     return parser
 
 
@@ -137,6 +140,22 @@ def main() -> None:
         except (KeyboardInterrupt, EOFError):
             print("\nConfiguración cancelada.", file=sys.stderr)
             raise SystemExit(130) from None
+    from .cli_commands import COMMANDS, CliError
+
+    if args.command in COMMANDS:
+        from .academic_profile import AcademicProfileError
+
+        try:
+            asyncio.run(COMMANDS[args.command](UscService(), args))
+        except (CliError, CampusError, AcademicProfileError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            diagnostic = getattr(exc, "as_dict", None)
+            if callable(diagnostic) and diagnostic().get("action") == "renew_session":
+                print("Renueva la sesión con `mcp-usc login`.", file=sys.stderr)
+            raise SystemExit(1) from exc
+        except KeyboardInterrupt:
+            raise SystemExit(130) from None
+        return
     if args.command == "client-config":
         from .setup_wizard import client_config_text, server_command
 

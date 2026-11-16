@@ -57,6 +57,25 @@ uv tool install --reinstall --refresh "mcp-usc[browser-auth] @ https://github.co
 Si la sesión caduca, vuelve a entrar con `mcp-usc login`.
 Para otros clientes MCP, `mcp-usc client-config` muestra la configuración que hay que pegar.
 
+## Desde la terminal
+
+No hace falta un asistente: los mismos datos están en comandos. Las asignaturas se indican por
+número, código o nombre (`ia`, `redes`, `soi`…), y todos aceptan `--json`.
+
+```sh
+mcp-usc pendientes            # entregas y cuestionarios de los próximos 14 días
+mcp-usc horario               # tu semana, solo tus asignaturas (--grupos CLE_01 CLIL_03 para filtrar)
+mcp-usc examenes              # fechas oficiales de examen de tus asignaturas
+mcp-usc cursos                # tus asignaturas de este curso
+mcp-usc materiales ia         # archivos y carpetas de una asignatura
+mcp-usc descargar ia          # los descarga a Descargas/mcp-usc/<asignatura>; repetirlo baja solo lo nuevo
+```
+
+Con la sesión de alumno, Moodle solo entrega un archivo cuando se abre su actividad, así que
+`descargar` deja constancia de que abriste cada material nuevo, igual que al hacer clic en la web:
+por eso pregunta antes (o `--si`). Lo ya descargado no se vuelve a abrir. `USC_DOWNLOAD_ROOT`
+cambia la carpeta por defecto y `--carpeta` la de una descarga concreta.
+
 ## Qué puedes pedirle
 
 | Necesidad | Ejemplo de petición |
@@ -74,9 +93,10 @@ consulta correo ni Teams, no eleva privilegios y no actúa como profesorado o ad
 
 ## Estado del proyecto
 
-La versión **0.11.0** es una beta comunitaria: expone **92 herramientas MCP**, cuatro recursos
-pasivos y cuatro prompts guiados. Las herramientas se dividen en 50 lecturas puras, 21
-previsualizaciones, 20 operaciones con efecto y una inspección potencialmente stateful. El catálogo
+La versión **0.11.0** es una beta comunitaria: expone **94 herramientas MCP**, cuatro recursos
+pasivos y cuatro prompts guiados. Las herramientas se dividen en 50 lecturas puras, 22
+previsualizaciones, 20 operaciones con efecto y dos lecturas que pueden registrar una visita
+(inspeccionar una entrega y descargar materiales). El catálogo
 interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no significa
 que la USC o el token de cada persona habiliten todas ellas.
 
@@ -100,7 +120,7 @@ Para validar de verdad un token o una sesión mediante una lectura HTTP usa desp
 
 - [Primeros pasos](docs/getting-started.md): instalación, autenticación y conexión con un cliente.
 - [Servirlo por HTTP](docs/deployment.md): servidor propio, contenedor o Vercel, con token.
-- [Inventario de herramientas](docs/tools.md): las 92 herramientas, tipos y requisitos.
+- [Inventario de herramientas](docs/tools.md): las 94 herramientas, tipos y requisitos.
 - [Superficie MCP](docs/mcp-surface.md): recursos, prompts y manifiesto local.
 - [Compatibilidad](docs/compatibility.md): sistemas, Python, hosts y transportes Moodle.
 - [Arquitectura](docs/architecture.md): transportes, componentes y fronteras de confianza.
@@ -367,8 +387,9 @@ complementarias; ninguna sustituye una decisión humana sobre los parámetros ex
 
 ## Herramientas MCP
 
-La versión 0.11.0 expone 92 herramientas: 50 lecturas puras, 21 previsualizaciones, 20 operaciones con
-efecto y una inspección potencialmente *stateful* que también exige confirmación. El
+La versión 0.11.0 expone 94 herramientas: 50 lecturas puras, 22 previsualizaciones, 20 operaciones con
+efecto y dos lecturas *stateful* (inspeccionar una entrega y descargar materiales) que también
+exigen confirmación. El
 [inventario completo](docs/tools.md) y el
 [estudio de capacidades](docs/student-capability-study.md) explican las fronteras de seguridad y
 las diferencias entre Moodle 4.5 y 5.2.

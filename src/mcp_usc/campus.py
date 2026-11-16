@@ -133,6 +133,14 @@ class CampusGateway(ABC):
         """Like status(), but always proves the credential against Moodle (no cache)."""
         return await self.status()
 
+    async def open_activity_file(
+        self, course_module_id: int, module_type: str, max_bytes: int
+    ) -> tuple[bytes, str, str, str]:
+        """Download a resource/folder by opening it like a browser (records the view)."""
+        raise CampusCapabilityUnavailable(
+            "Este transporte descarga los archivos por su URL directa, sin abrir la actividad."
+        )
+
     async def invoke_course_module(self, function: str, arguments: Mapping[str, Any]) -> Any:
         """Use a course-module ID only on transports that explicitly support it."""
         raise CampusProtocolError(
@@ -204,6 +212,30 @@ def _moodle_file_url(url: str, base_url: str, *, webservice: bool) -> str:
             target = "/webservice/pluginfile.php" if webservice else "/pluginfile.php"
             return urlunparse(("https", base.netloc, f"{target}{suffix}", "", "", ""))
     raise ValueError("La URL no corresponde a un archivo Moodle permitido")
+
+
+_DISPOSITION_STAR = re.compile(r"filename\*\s*=\s*([^']*)'[^']*'([^;]+)", re.IGNORECASE)
+_DISPOSITION_PLAIN = re.compile(r'filename\s*=\s*"?([^";]+)"?', re.IGNORECASE)
+_UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
+
+
+def _download_filename(response: httpx.Response) -> str:
+    """Filename from Content-Disposition, else the last URL segment; always path-safe."""
+
+    header = response.headers.get("content-disposition", "")
+    name = ""
+    if match := _DISPOSITION_STAR.search(header):
+        charset = match.group(1) or "utf-8"
+        try:
+            name = unquote(match.group(2).strip(), encoding=charset, errors="replace")
+        except LookupError:
+            name = unquote(match.group(2).strip())
+    elif match := _DISPOSITION_PLAIN.search(header):
+        name = match.group(1).strip()
+    if not name:
+        name = unquote(urlparse(str(response.url)).path.rsplit("/", 1)[-1])
+    name = _UNSAFE_FILENAME.sub("_", name).strip(" .")
+    return name[:200] or "archivo"
 
 
 class _DiscardingCookieJar(http.cookiejar.CookieJar):
@@ -1195,6 +1227,77 @@ class HttpSessionMoodleGateway(CampusGateway):
         if content is None:
             raise CampusProtocolError("Moodle no devolvió el contenido del recurso.")
         return content, media_type, final_url
+
+    async def open_activity_file(
+        self, course_module_id: int, module_type: str, max_bytes: int
+    ) -> tuple[bytes, str, str, str]:
+        """Download a resource or a folder the way the browser does.
+
+        With a session, Moodle only reveals a file's URL when the activity is opened, and
+        opening it records the view (and completion on view), exactly like clicking it on
+        the web. Callers must therefore have the user's explicit consent. Only the
+        activity's own entry point is requested, and redirects may only lead to this
+        Campus's /pluginfile.php. Returns (content, media type, final URL, filename).
+        """
+
+        if isinstance(course_module_id, bool) or not isinstance(course_module_id, int):
+            raise ValueError("course_module_id debe ser un entero positivo")
+        if course_module_id <= 0:
+            raise ValueError("course_module_id debe ser un entero positivo")
+        if module_type == "resource":
+            target = self._url("mod/resource/view.php", {"id": course_module_id, "redirect": 1})
+        elif module_type == "folder":
+            target = self._url("mod/folder/download_folder.php", {"id": course_module_id})
+        else:
+            raise CampusCapabilityUnavailable(
+                f"Solo se descargan archivos y carpetas; «{module_type}» no es un archivo."
+            )
+        cookie = self._session_cookie()
+        try:
+            async with self._client(cookie) as client:
+                for _ in range(6):
+                    response = await client.send(
+                        client.build_request("GET", target), stream=True
+                    )
+                    try:
+                        if self._is_auth_failure_response(response):
+                            self._ensure_authenticated_response(response)
+                        self._remember_rotated_cookie(response, cookie)
+                        if response.is_redirect:
+                            location = response.headers.get("location", "")
+                            try:
+                                target = _moodle_file_url(
+                                    urljoin(str(response.url), location),
+                                    self.base_url,
+                                    webservice=False,
+                                )
+                            except ValueError as exc:
+                                raise CampusProtocolError(
+                                    "Moodle no redirigió a un archivo del Campus (¿es un enlace "
+                                    "externo o una carpeta sin descarga?)."
+                                ) from exc
+                            continue
+                        self._ensure_authenticated_response(response)
+                        media_type = (
+                            response.headers.get("content-type", "").split(";", 1)[0].strip()
+                        )
+                        disposition = response.headers.get("content-disposition", "")
+                        if media_type == "text/html" and "attachment" not in disposition:
+                            # An error or notice page instead of the file.
+                            raise CampusCapabilityUnavailable(
+                                "Moodle no entregó el archivo de esa actividad (puede que la "
+                                "carpeta no permita descargarse o que no tenga archivos)."
+                            )
+                        content = await _read_limited_response(response, max_bytes)
+                        final_url = urlunparse((*urlparse(str(response.url))[:3], "", "", ""))
+                        return content, media_type, final_url, _download_filename(response)
+                    finally:
+                        await response.aclose()
+                raise CampusProtocolError("Moodle devolvió demasiadas redirecciones.")
+        except CampusError:
+            raise
+        except httpx.HTTPError:
+            raise CampusError("No se pudo descargar el archivo del Campus Virtual.") from None
 
     def _safe_form_url(self, url: str, query: Mapping[str, Any] | None = None) -> str:
         resolved = urljoin(f"{self.base_url}/", url)

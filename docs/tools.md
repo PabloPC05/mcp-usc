@@ -1,6 +1,6 @@
 # Inventario de herramientas MCP
 
-La versión 0.11.0 expone 92 herramientas. Este documento enumera el contrato público completo; el
+La versión 0.11.0 expone 94 herramientas. Este documento enumera el contrato público completo; el
 servidor también lo devuelve agrupado mediante `describe_mcp_usc` y un test lo compara con el
 inventario STDIO real.
 
@@ -93,6 +93,8 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `list_course_contents` | R | Secciones, actividades, páginas, enlaces y archivos de una materia. |
 | `list_course_resources` | R | Referencias descargables o metadatos CMID si la sesión no publica archivos. |
 | `read_course_resource` | R | Descarga y extrae texto de PDF, texto/HTML y OOXML con límites. |
+| `preview_download_course_files` | P | Prepara descargar los archivos y carpetas de una materia a la carpeta local. |
+| `download_course_files` | S | Descarga lo confirmado; con sesión de alumno, Moodle registra que se abrió cada material. |
 | `list_exam_sources` | R | Fuentes públicas configuradas para el buscador genérico. |
 | `search_exam_dates` | R | Busca evidencia de fechas en páginas/PDF USC configurados. |
 | `list_usc_degrees` | R | Titulaciones enlazadas por el catálogo oficial actual. |
@@ -186,7 +188,7 @@ cada llamada comprueba su contrato y falla cerrado.
 
 ## Catálogo genérico
 
-Además de estas 92 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
+Además de estas 94 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
 expresamente en una allowlist. `execute_student_action` admite 12 acciones genéricas acotadas. El
 [estudio de capacidades](student-capability-study.md) documenta las 301 funciones evaluadas, sus
 efectos y las diferencias entre versiones Moodle.

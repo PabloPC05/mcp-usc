@@ -20,7 +20,7 @@ def test_passive_resources_are_local_and_explain_safety() -> None:
 
     assert compatibility["version"] == "0.11.0"
     assert compatibility["network_contacted"] is False
-    assert compatibility["mcp"]["tools"] == 92
+    assert compatibility["mcp"]["tools"] == 94
     assert compatibility["mcp"]["resources"] == 4
     assert workflows["network_contacted"] is False
     assert len(workflows["prompts"]) == 4

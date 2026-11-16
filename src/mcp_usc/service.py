@@ -97,6 +97,12 @@ from .contextual_actions import (
 )
 from .contextual_actions import reply_forum_post as moodle_reply_forum_post
 from .contextual_actions import submit_choice_response as moodle_submit_choice_response
+from .course_downloads import (
+    DownloadItem,
+    course_folder_name,
+    download_items,
+    list_download_items,
+)
 from .degree_catalog import (
     USC_DEGREE_CATALOG_URL,
     UscDegreeCatalogClient,
@@ -1911,6 +1917,116 @@ class UscService:
             limit=limit,
         )
         return _register_result_resources(result)
+
+    async def course_download_plan(
+        self, course_id: int, module_ids: list[int] | None = None
+    ) -> dict[str, Any]:
+        """What downloading a course's files would fetch, where, and whether it is recorded."""
+
+        if isinstance(course_id, bool) or not isinstance(course_id, int) or course_id <= 0:
+            raise ValueError("course_id debe ser un entero positivo")
+        gateway = self._campus()
+        session = _session_form_client(gateway) is not None
+        items, skipped = await list_download_items(gateway, course_id, session=session)
+        if module_ids:
+            wanted = set(module_ids)
+            items = [item for item in items if item.module_id in wanted]
+            missing = wanted - {item.module_id for item in items}
+            if missing:
+                raise ValueError(
+                    "Estos module_ids no son archivos ni carpetas descargables de la materia: "
+                    + ", ".join(str(value) for value in sorted(missing))
+                )
+        courses = [
+            normalise_course(course)
+            for course in await gateway.list_courses(include_archived=True)
+        ]
+        course_name = next(
+            (str(course["full_name"]) for course in courses if course["id"] == course_id),
+            f"Materia {course_id}",
+        )
+        root = self.settings.download_root or Path.home() / "Downloads" / "mcp-usc"
+        return {
+            "gateway": gateway,
+            "course_id": course_id,
+            "course_name": course_name,
+            "items": items,
+            "skipped": skipped,
+            "records_views": session,
+            "folder": root / course_folder_name(course_name, course_id),
+        }
+
+    @staticmethod
+    def _download_payload(plan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "course_id": plan["course_id"],
+            "module_keys": [item.key for item in plan["items"]],
+            "folder": str(plan["folder"]),
+        }
+
+    async def preview_download_course_files(
+        self, course_id: int, module_ids: list[int] | None = None
+    ) -> dict[str, Any]:
+        plan = await self.course_download_plan(course_id, module_ids)
+        items: list[DownloadItem] = plan["items"]
+        confirmation = await _issue_action_confirmation(
+            plan["gateway"], "course.download_files", self._download_payload(plan)
+        )
+        return {
+            "course_id": course_id,
+            "course_name": plan["course_name"],
+            "folder": str(plan["folder"]),
+            "count": len(items),
+            "items": [item.public_dict() for item in items[:100]],
+            "items_truncated": len(items) > 100,
+            "not_downloadable": plan["skipped"],
+            "records_views": plan["records_views"],
+            "note": (
+                "Con la sesión de alumno, Moodle solo entrega cada archivo al abrir su "
+                "actividad: registrará que los abriste, igual que al hacer clic en la web. "
+                "Lo ya descargado antes no se vuelve a abrir."
+                if plan["records_views"]
+                else "Se descargan por su URL directa; Moodle no registra ninguna visita."
+            ),
+            "content_is_untrusted": True,
+            **confirmation,
+        }
+
+    async def download_course_files(
+        self, course_id: int, module_ids: list[int] | None, confirmation_token: str
+    ) -> dict[str, Any]:
+        plan = await self.course_download_plan(course_id, module_ids)
+        await _consume_action_confirmation(
+            plan["gateway"],
+            confirmation_token,
+            "course.download_files",
+            self._download_payload(plan),
+        )
+        return await self.download_course_files_now(plan)
+
+    async def download_course_files_now(
+        self,
+        plan: dict[str, Any],
+        *,
+        folder: Path | None = None,
+        force: bool = False,
+        progress: Any = None,
+    ) -> dict[str, Any]:
+        """Run a download plan. The CLI calls this after its own explicit prompt."""
+
+        result = await download_items(
+            plan["gateway"],
+            plan["items"],
+            folder or plan["folder"],
+            force=force,
+            progress=progress,
+        )
+        return {
+            "course_id": plan["course_id"],
+            "course_name": plan["course_name"],
+            "records_views": plan["records_views"],
+            **result,
+        }
 
     async def read_course_resource(
         self,

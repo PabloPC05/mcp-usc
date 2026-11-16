@@ -7,11 +7,11 @@ cuenta: herramientas, recursos y prompts. El transporte del servidor continúa s
 
 | Bloque | Cantidad | Control principal | Contacto con el Campus |
 | --- | ---: | --- | --- |
-| Herramientas | 92 | El modelo solicita la llamada; el host aplica aprobación | Según la herramienta |
+| Herramientas | 94 | El modelo solicita la llamada; el host aplica aprobación | Según la herramienta |
 | Recursos | 4 | El host o la persona los incorpora como contexto | Nunca; son estáticos y locales |
 | Prompts | 4 | La persona los selecciona explícitamente | No por sí mismos; guían herramientas |
 
-Que un host no muestre recursos o prompts no impide usar las 92 herramientas. Estas capacidades son
+Que un host no muestre recursos o prompts no impide usar las 94 herramientas. Estas capacidades son
 opcionales en las interfaces cliente y no sustituyen las confirmaciones de escritura.
 
 ## Recursos

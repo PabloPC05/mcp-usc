@@ -38,7 +38,7 @@ uv run mcp-usc manifest --compact
 muestra su valor y no contacta con el Campus. Un estado `public_only` es válido: significa que las
 herramientas públicas están listas y falta configurar acceso privado.
 
-`manifest` también es local y exporta el contrato exacto que verá un cliente: 92 herramientas,
+`manifest` también es local y exporta el contrato exacto que verá un cliente: 94 herramientas,
 cuatro recursos, cuatro prompts y un SHA-256 determinista. Sirve para diagnóstico y revisión sin
 arrancar una conexión con Moodle.
 
