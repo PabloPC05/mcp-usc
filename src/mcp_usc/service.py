@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import mimetypes
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .academic_profile import AcademicProfileError
+from .academic_profile import AcademicProfileError, resolve_academic_context
 from .activity_actions import ActivityActionError
 from .activity_actions import (
     mark_course_self_completed as moodle_mark_course_self_completed,
@@ -106,12 +108,15 @@ from .local_files import inspect_upload_files
 from .official_exams import (
     discover_official_exam_subjects,
     fetch_official_exam_dates,
+    fetch_subject_exam_dates,
     list_official_exam_degrees,
+    locate_student_subjects,
 )
 from .public_http_cache import PublicHttpCache, public_cache_summary
 from .public_web import search_exam_sources
 from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
+from .resource_references import issue_resource_reference, resolve_resource_reference
 from .resource_text import extract_resource_text
 from .security import html_to_text
 from .session_course_state import (
@@ -133,12 +138,30 @@ from .student_capabilities import (
     validate_arguments,
 )
 
+_LIST_DESCRIPTION_CHARS = 400
+# Plan sheets (".../intelixencia-artificial-17632-16883-2-98066") and timetable sessions
+# (".../subject/17632-16883-2-98066") end with the same subject offering id.
+_SUBJECT_OFFERING_ID = re.compile(r"(\d+-\d+-\d+-\d+)/?$")
+_TIMETABLE_CONCURRENCY = 4
+_SESSION_FIELDS = (
+    "date",
+    "weekday",
+    "start_time",
+    "end_time",
+    "subject_name",
+    "activity_type",
+    "group_code",
+    "room",
+)
+
+
+def _subject_offering_id(url: object) -> str | None:
+    match = _SUBJECT_OFFERING_ID.search(str(url or ""))
+    return match.group(1) if match else None
 _MESSAGE_CONFIRMATION_TTL = 300
 _MESSAGE_CONFIRMATIONS: dict[str, tuple[float, int, int, str]] = {}
 _MESSAGE_CONTACT_TTL = 600
 _MESSAGE_CONTACTS: dict[int, tuple[float, int, str]] = {}
-_RESOURCE_TTL = 600
-_RESOURCE_REFERENCES: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _message_digest(recipient_user_id: int, text: str) -> str:
@@ -150,19 +173,14 @@ def _register_resource(resource: dict[str, Any]) -> None:
     url = resource.pop("url", None)
     if not url:
         return
-    now = time.monotonic()
-    expired = [token for token, item in _RESOURCE_REFERENCES.items() if item[0] < now]
-    for token in expired:
-        _RESOURCE_REFERENCES.pop(token, None)
-    token = secrets.token_urlsafe(18)
-    reference = {
-        "url": url,
-        "filename": str(resource.get("file_name") or resource.get("name") or "resource"),
-        "media_type": str(resource.get("mime_type") or ""),
-        "declared_size": int(resource.get("file_size") or 0),
-    }
-    _RESOURCE_REFERENCES[token] = (now + _RESOURCE_TTL, reference)
-    resource["resource_token"] = token
+    resource["resource_token"] = issue_resource_reference(
+        {
+            "url": url,
+            "filename": str(resource.get("file_name") or resource.get("name") or "resource"),
+            "media_type": str(resource.get("mime_type") or ""),
+            "declared_size": int(resource.get("file_size") or 0),
+        }
+    )
     resource["source_url"] = url
 
 
@@ -224,6 +242,16 @@ def _require_rest_for_assignment(gateway: Any) -> None:
 def _session_form_client(gateway: Any):
     form_factory = getattr(gateway, "session_forms", None)
     return form_factory() if form_factory is not None else None
+
+
+_SESSION_QUIZ_FORCE_NEW_MESSAGE = (
+    "force_new no está soportado en modo sesión: el formulario HTTP de Moodle no permite "
+    "forzar un intento nuevo. Usa force_new=false o configura un token REST."
+)
+_SESSION_QUIZ_FINISH_MESSAGE = (
+    "El formulario HTTP no puede finalizar conservando responses, preflight_data o time_up. "
+    "No se finalizó el intento: guarda primero las respuestas mediante su flujo confirmado."
+)
 
 
 def _public_uploads(inspected: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -384,7 +412,8 @@ class UscService:
         return create_campus_gateway(self.settings)
 
     async def auth_status(self) -> dict[str, Any]:
-        return await self._campus().status()
+        # The one place that must prove the credential still works: never cached.
+        return await self._campus().verify_status()
 
     async def list_student_capabilities(
         self,
@@ -678,9 +707,23 @@ class UscService:
             "limit": limit,
             "offset": offset,
         }
-        if status != "all":
-            arguments["status"] = status
-        return await self.call_student_read("message_popup_get_popup_notifications", arguments)
+        result = await self.call_student_read(
+            "message_popup_get_popup_notifications", arguments
+        )
+        # Moodle's function has no status parameter (sending one is `invalidparameter`):
+        # the read/unread filter is applied to the page Moodle returns.
+        payload = result.get("result")
+        if status != "all" and isinstance(payload, dict):
+            wanted_read = status == "read"
+            notifications = payload.get("notifications")
+            if isinstance(notifications, list):
+                payload["notifications"] = [
+                    item
+                    for item in notifications
+                    if isinstance(item, dict) and bool(item.get("read")) is wanted_read
+                ]
+        result["status_filter"] = status
+        return result
 
     async def list_calendar_events(
         self,
@@ -1113,14 +1156,27 @@ class UscService:
         if limit < 1 or limit > 50:
             raise ValueError("limit debe estar entre 1 y 50")
         now = datetime.now(MADRID)
-        start = 0 if include_overdue else int(now.timestamp())
+        if include_overdue:
+            # Only this academic year's overdue work: Moodle keeps every never-completed
+            # action from past years, which buried the current tasks (seen live: 32 of 50).
+            academic_year = now.year if now.month >= 9 else now.year - 1
+            start = int(datetime(academic_year, 9, 1, tzinfo=MADRID).timestamp())
+        else:
+            start = int(now.timestamp())
         end = int((now + timedelta(days=days)).timestamp())
-        events = await self._campus().action_events(start, end, limit)
         wanted = set(course_ids or [])
+        # Moodle applies the limit before our course filter, so ask for a full page.
+        events = await self._campus().action_events(start, end, 50 if wanted else limit)
         normalised = [normalise_event(event) for event in events]
         if wanted:
             normalised = [event for event in normalised if event.get("course_id") in wanted]
-        return normalised
+        for event in normalised[:limit]:
+            description = str(event.get("description") or "")
+            if len(description) > _LIST_DESCRIPTION_CHARS:
+                # Full statements stay available through get_work_item.
+                event["description"] = description[:_LIST_DESCRIPTION_CHARS].rstrip() + "…"
+                event["description_truncated"] = True
+        return normalised[:limit]
 
     async def get_work_item(self, event_id: int) -> dict[str, Any]:
         if event_id <= 0:
@@ -1236,8 +1292,13 @@ class UscService:
         profile = self.settings.academic_profile
         if profile is None:
             raise AcademicProfileError(
-                "No hay perfil académico local; configura USC_ACADEMIC_DEGREE_URL y "
-                "USC_ACADEMIC_COURSE_NUMBER (o USC_ACADEMIC_PROFILE_FILE)"
+                "No hay perfil académico local; ejecuta `mcp-usc setup` o configura "
+                "USC_ACADEMIC_DEGREE_URL y USC_ACADEMIC_COURSE_NUMBER"
+            )
+        if profile.course_number is None:
+            raise AcademicProfileError(
+                "El perfil no fija un curso. Usa get_my_subjects_timetable para el horario de "
+                "tus asignaturas, estén en el curso o grado que estén."
             )
         resolved_year, resolved_semester, resolved_date = profile.resolve(
             academic_year=academic_year,
@@ -1266,6 +1327,204 @@ class UscService:
                 "date_in_week": resolved_date,
                 "content_is_untrusted": False,
             },
+        }
+
+    async def get_my_subjects_timetable(
+        self,
+        academic_year: str | None = None,
+        semester: int | None = None,
+        date_in_week: str | None = None,
+        subject_codes: list[str] | None = None,
+        group_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Week timetable of the student's own subjects, whatever their course or degree.
+
+        Subjects come from ``subject_codes``, else the profile, else the Moodle courses of
+        the academic year. Each code is placed in its degree, course and semester through
+        the official study plans (the student's degrees first, then the whole catalogue),
+        and only sessions of those exact subjects are kept.
+        """
+
+        profile = self.settings.academic_profile
+        year, resolved_semester, resolved_date = resolve_academic_context(
+            profile, academic_year=academic_year, semester=semester, date_in_week=date_in_week
+        )
+        moodle_courses: list[dict[str, Any]] = []
+        if subject_codes:
+            codes, subject_source = list(subject_codes), "argument"
+        elif profile is not None and profile.subject_codes:
+            codes, subject_source = list(profile.subject_codes), "profile"
+        else:
+            codes, moodle_courses = await self._moodle_subject_codes(year)
+            subject_source = "moodle"
+        if not codes:
+            raise AcademicProfileError(
+                "No hay asignaturas: pasa subject_codes, añádelas al perfil (subject_codes) o "
+                "inicia sesión en el Campus para leerlas de tus cursos de Moodle."
+            )
+        located = await locate_student_subjects(
+            codes,
+            year,
+            degree_urls=self._profile_degree_urls(),
+            timeout=self.settings.request_timeout_seconds,
+            cache=self._public_http_cache,
+        )
+        subjects: list[dict[str, Any]] = []
+        wanted: dict[tuple[str, int], dict[str, str]] = {}
+        for code in located.searches[0].requested_codes:
+            options = located.for_code(code)
+            if not options:
+                subjects.append({"subject_code": code, "status": "not_found_in_study_plans"})
+                continue
+            location = options[0]
+            entry = {
+                "subject_code": code,
+                "subject_name": location.subject.name,
+                "degree_name": location.degree.name,
+                "degree_url": location.degree.url,
+                "course_number": location.subject.course_number,
+                "semester": location.subject.semester,
+                "other_degrees": [item.degree.url for item in options[1:]],
+                "content_is_untrusted": True,
+            }
+            if location.subject.course_number is None:
+                entry["status"] = "course_unknown_in_study_plan"
+            elif location.subject.semester not in {None, resolved_semester}:
+                entry["status"] = "other_semester"
+            else:
+                entry["status"] = "included"
+                offering_ids = {
+                    offering
+                    for url in location.subject.sheet_urls
+                    if (offering := _subject_offering_id(url)) is not None
+                }
+                group = wanted.setdefault(
+                    (location.degree.url, location.subject.course_number), {}
+                )
+                for offering in offering_ids:
+                    group[offering] = code
+            subjects.append(entry)
+
+        client = UscClassTimetableClient(
+            timeout=self.settings.request_timeout_seconds, cache=self._public_http_cache
+        )
+        semaphore = asyncio.Semaphore(_TIMETABLE_CONCURRENCY)
+
+        async def timetable(degree_url: str, course: int, program_id: int | None) -> Any:
+            async with semaphore:
+                try:
+                    return await client.fetch_degree_timetable(
+                        degree_url,
+                        course_number=course,
+                        academic_year=year,
+                        semester=resolved_semester,
+                        date_in_week=resolved_date,
+                        group_codes=group_codes or None,
+                        program_id=program_id,
+                    )
+                except Exception as exc:  # reported per course, never hides the others
+                    return exc
+
+        groups = list(wanted)
+        results = await asyncio.gather(*(timetable(url, course, None) for url, course in groups))
+        sessions: dict[tuple[Any, ...], dict[str, Any]] = {}
+        sources: list[dict[str, Any]] = []
+        timetable_index: dict[str, int] = {}
+        complete_flags: list[bool] = []
+        issues: list[dict[str, Any]] = []
+
+        async def collect(key: tuple[str, int], result: Any) -> None:
+            degree_url, course = key
+            if isinstance(result, Exception):
+                issues.append(
+                    {
+                        "degree_url": degree_url,
+                        "course_number": course,
+                        "message": str(result)[:300],
+                    }
+                )
+                return
+            if result.get("status") == "program_selection_required":
+                # Homonymous plans: try each one; exact offering ids keep them apart.
+                options = [
+                    option.get("program_id") for option in result.get("program_options", [])
+                ]
+                retries = await asyncio.gather(
+                    *(timetable(degree_url, course, pid) for pid in options if pid)
+                )
+                for retry in retries:
+                    await collect(key, retry)
+                return
+            complete_flags.append(result.get("complete") is not False)
+            source_index: dict[str, int] = {}
+            for source in result.get("sources", []):
+                url = str(source.get("timetable_url") or "")
+                if url in timetable_index:
+                    source_index[url] = timetable_index[url]
+                    continue
+                week = source.get("week") if isinstance(source.get("week"), dict) else {}
+                timetable_index[url] = source_index[url] = len(sources)
+                sources.append(
+                    {
+                        "degree_name": result.get("degree_name"),
+                        "degree_url": degree_url,
+                        "course_number": course,
+                        "center_name": source.get("center_name"),
+                        "program_id": source.get("program_id"),
+                        "timetable_url": source.get("timetable_url"),
+                        "status": source.get("status"),
+                        "week": {
+                            key: week.get(key) for key in ("label", "start_date", "end_date")
+                        },
+                    }
+                )
+            for session in result.get("sessions", []):
+                code = wanted[key].get(_subject_offering_id(session.get("subject_url")) or "")
+                if code is None:
+                    continue
+                identity = (
+                    session.get("date"),
+                    session.get("start_time"),
+                    session.get("subject_url"),
+                    session.get("group_code"),
+                    session.get("room"),
+                )
+                # Provenance (timetable URL, centre, plan) lives once in `timetables`.
+                compact = {field: session.get(field) for field in _SESSION_FIELDS}
+                compact["subject_code"] = code
+                compact["timetable"] = source_index.get(str(session.get("timetable_url") or ""))
+                sessions.setdefault(identity, compact)
+
+        for key, result in zip(groups, results, strict=True):
+            await collect(key, result)
+        ordered = sorted(
+            sessions.values(),
+            key=lambda item: (
+                str(item.get("date")),
+                str(item.get("start_time")),
+                str(item.get("subject_name")),
+                str(item.get("group_code")),
+            ),
+        )
+        return {
+            "academic_year": year,
+            "semester": resolved_semester,
+            "date_in_week": resolved_date,
+            "subject_source": subject_source,
+            "matched_moodle_courses": moodle_courses,
+            "subjects": subjects,
+            "sessions": ordered,
+            "count": len(ordered),
+            "timetables": sources,
+            "issues": issues,
+            "complete": located.complete and not issues and all(complete_flags),
+            "read_only": True,
+            "content_is_untrusted": True,
+            "note": (
+                "Solo sesiones de tus asignaturas, por identificador exacto de materia. Moodle "
+                "no publica tus grupos por AJAX: cada sesión indica su group_code; usa "
+                "group_codes para filtrar."
+            ),
         }
 
     async def locate_usc_subject_codes(
@@ -1317,30 +1576,50 @@ class UscService:
             cache=self._public_http_cache,
         )
 
+    def _profile_degree_urls(self) -> list[str]:
+        profile = self.settings.academic_profile
+        return list(profile.degree_urls) if profile is not None else []
+
     async def get_official_exam_dates(
         self,
         subject_codes: list[str],
         academic_year: str,
         degree_keys: list[str] | None = None,
+        degree_urls: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await fetch_official_exam_dates(
+        if degree_keys:
+            # Curated institutional crosswalk (centre calendars) for the degrees that have one.
+            return await fetch_official_exam_dates(
+                subject_codes,
+                academic_year,
+                degree_keys,
+                timeout=self.settings.request_timeout_seconds,
+                cache=self._public_http_cache,
+            )
+        # Any degree: study plans plus each subject's official sheet. Explicit degree_urls
+        # bound the search; otherwise the profile's degrees go first and the catalogue
+        # covers whatever they do not contain.
+        explicit = bool(degree_urls)
+        return await fetch_subject_exam_dates(
             subject_codes,
             academic_year,
-            degree_keys,
+            degree_urls=list(degree_urls or []) if explicit else self._profile_degree_urls(),
+            widen_to_catalog=not explicit,
             timeout=self.settings.request_timeout_seconds,
             cache=self._public_http_cache,
         )
 
-    async def get_my_official_exam_schedule(
-        self, academic_year: str, degree_keys: list[str] | None = None
-    ) -> dict[str, Any]:
-        academic_year = normalise_academic_year(academic_year)
+    async def _moodle_subject_codes(
+        self, academic_year: str
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """G codes of the student's Moodle courses for one academic year (any degree)."""
+
         courses = [
             normalise_course(course)
             for course in await self._campus().list_courses(include_archived=True)
         ]
         selected: list[dict[str, Any]] = []
-        seen_codes: list[str] = []
+        codes: list[str] = []
         for course in courses:
             code = extract_subject_code(course.get("short_name"), course.get("full_name"))
             course_year = extract_academic_year(course.get("short_name"), course.get("full_name"))
@@ -1356,9 +1635,18 @@ class UscService:
                     "content_is_untrusted": True,
                 }
             )
-            if code not in seen_codes:
-                seen_codes.append(code)
+            if code not in codes:
+                codes.append(code)
+        return codes, selected
 
+    async def get_my_official_exam_schedule(
+        self,
+        academic_year: str,
+        degree_keys: list[str] | None = None,
+        degree_urls: list[str] | None = None,
+    ) -> dict[str, Any]:
+        academic_year = normalise_academic_year(academic_year)
+        seen_codes, selected = await self._moodle_subject_codes(academic_year)
         if not seen_codes:
             return {
                 "academic_year": academic_year,
@@ -1370,7 +1658,9 @@ class UscService:
                     "visibles u ocultos del tablero. No se consultó ninguna fuente pública."
                 ),
             }
-        result = await self.get_official_exam_dates(seen_codes, academic_year, degree_keys)
+        result = await self.get_official_exam_dates(
+            seen_codes, academic_year, degree_keys, degree_urls
+        )
         result["matched_moodle_courses"] = selected
         return result
 
@@ -1631,19 +1921,18 @@ class UscService:
     ) -> dict[str, Any]:
         if not isinstance(resource_token, str) or not resource_token:
             raise ValueError("resource_token es obligatorio")
-        now = time.monotonic()
-        cached = _RESOURCE_REFERENCES.get(resource_token)
-        if not cached or cached[0] < now:
-            _RESOURCE_REFERENCES.pop(resource_token, None)
-            raise ValueError(
-                "El recurso no procede de una lista reciente o su referencia ha caducado."
-            )
-        reference = cached[1]
+        reference = resolve_resource_reference(resource_token)
         if not 1 <= max_bytes <= 50 * 1024 * 1024:
             raise ValueError("max_bytes debe estar entre 1 y 52428800")
+        if not 1 <= max_chars <= 500_000:
+            raise ValueError("max_chars debe estar entre 1 y 500000")
+        if not 1 <= max_pdf_pages <= 300:
+            raise ValueError("max_pdf_pages debe estar entre 1 y 300")
         gateway = self._campus()
         content, media_type, source_url = await gateway.fetch_file(str(reference["url"]), max_bytes)
-        extracted = extract_resource_text(
+        # PDF and OOXML extraction is CPU-bound; keep the event loop responsive.
+        extracted = await asyncio.to_thread(
+            extract_resource_text,
             content,
             media_type=media_type or str(reference["media_type"]),
             filename=str(reference["filename"]),
@@ -2026,8 +2315,9 @@ class UscService:
             "assignment.replace_files",
             payload,
         )
+        # Read once: the bytes sent are exactly the bytes whose sha256 was confirmed.
+        uploads = _capture_confirmed_uploads(inspected, self.settings.max_upload_bytes)
         if form_client is not None:
-            uploads = _capture_confirmed_uploads(inspected, self.settings.max_upload_bytes)
             return await _session_form_mutation(
                 "assignment.replace_files",
                 form_client.replace_assignment_files(
@@ -2046,6 +2336,7 @@ class UscService:
             max_file_bytes=self.settings.max_upload_bytes,
             max_total_bytes=self.settings.max_upload_bytes,
             client_request_id=f"mcp-{secrets.token_hex(12)}",
+            contents=[upload.content for upload in uploads],
         )
 
     async def preview_delete_submission_files(
@@ -2712,6 +3003,8 @@ class UscService:
                 raise ValueError(
                     "La sesión HTTP necesita course_module_id para localizar el cuestionario."
                 )
+            if force_new:
+                raise ValueError(_SESSION_QUIZ_FORCE_NEW_MESSAGE)
         else:
             if quiz_id is None:
                 raise ValueError("El token REST requiere quiz_id")
@@ -2764,6 +3057,8 @@ class UscService:
                 )
             if course_module_id is None:
                 raise ValueError("Se requiere course_module_id para iniciar por formulario HTTP")
+            if force_new:
+                raise ValueError(_SESSION_QUIZ_FORCE_NEW_MESSAGE)
         elif quiz_id is None:
             raise ValueError("El token REST requiere quiz_id")
         await _consume_action_confirmation(gateway, confirmation_token, "quiz.start", payload)
@@ -2786,6 +3081,8 @@ class UscService:
         except CampusCapabilityUnavailable as exc:
             if course_module_id is None:
                 raise
+            if force_new:
+                raise CampusProtocolError(_SESSION_QUIZ_FORCE_NEW_MESSAGE) from exc
             return await _session_forms_or_raise(gateway, exc).start_quiz(
                 course_module_id,
                 preflight_data,
@@ -2883,6 +3180,9 @@ class UscService:
         form_client = form_factory() if form_factory else None
         if form_client is None:
             await _require_functions(gateway, "mod_quiz_process_attempt")
+        elif responses or preflight_data or time_up:
+            # Reject before issuing a token: the session form cannot honour these.
+            raise CampusProtocolError(_SESSION_QUIZ_FINISH_MESSAGE)
         payload = {
             "attempt_id": attempt_id,
             "responses": dict(responses or {}),
@@ -2920,16 +3220,12 @@ class UscService:
             "preflight_data": dict(preflight_data or {}),
         }
         gateway = self._campus()
-        await _consume_action_confirmation(gateway, confirmation_token, "quiz.finish", payload)
         form_factory = getattr(gateway, "session_forms", None)
         form_client = form_factory() if form_factory else None
+        if form_client is not None and (responses or preflight_data or time_up):
+            raise CampusProtocolError(_SESSION_QUIZ_FINISH_MESSAGE)
+        await _consume_action_confirmation(gateway, confirmation_token, "quiz.finish", payload)
         if form_client is not None:
-            if responses or preflight_data or time_up:
-                raise CampusProtocolError(
-                    "El formulario HTTP no puede finalizar conservando responses, "
-                    "preflight_data o time_up. No se finalizó el intento: guarda primero las "
-                    "respuestas mediante su flujo confirmado."
-                )
             return await _session_form_mutation(
                 "quiz.finish",
                 form_client.finish_quiz(attempt_id, confirmed=True),

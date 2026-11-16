@@ -275,31 +275,35 @@ async def test_session_quiz_rejects_internal_id_cmid_pair_before_inspection() ->
     assert gateway.forms.calls == []
 
 
-async def test_quiz_finish_form_fallback_refuses_to_discard_responses() -> None:
+async def test_session_quiz_start_rejects_force_new_at_preview() -> None:
     gateway = FakeSessionGateway()
     service = _service_with(gateway)
-    payload = {
-        "attempt_id": 41,
-        "responses": {"q1:1_answer": "2"},
-        "time_up": False,
-        "preflight_data": {},
-    }
-    preview = await service.preview_finish_quiz(
-        41,
-        payload["responses"],
-        False,
-        None,
-    )
+
+    with pytest.raises(ValueError, match="force_new"):
+        await service.preview_start_quiz(None, None, True, 23)
+
+    assert gateway.forms.calls == []
+
+
+@pytest.mark.parametrize(
+    ("responses", "time_up", "preflight"),
+    [
+        ({"q1:1_answer": "2"}, False, None),
+        (None, True, None),
+        (None, False, {"quizpassword": "clave"}),
+    ],
+)
+async def test_quiz_finish_session_rejects_unsupported_request_at_preview(
+    responses: dict[str, Any] | None, time_up: bool, preflight: dict[str, Any] | None
+) -> None:
+    gateway = FakeSessionGateway()
+    service = _service_with(gateway)
+    issued_before = len(ACTION_CONFIRMATIONS._pending)
 
     with pytest.raises(CampusProtocolError, match="No se finalizó"):
-        await service.finish_quiz(
-            41,
-            payload["responses"],
-            False,
-            None,
-            preview["confirmation_token"],
-        )
+        await service.preview_finish_quiz(41, responses, time_up, preflight)
 
+    assert len(ACTION_CONFIRMATIONS._pending) == issued_before
     assert all(call[0] != "finish_quiz" for call in gateway.forms.calls)
 
 

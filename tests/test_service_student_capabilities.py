@@ -480,3 +480,28 @@ async def test_server_convenience_tools_forward_exact_parameters(
 
     assert await getattr(server, tool_name)(*args) == {"ok": True}
     method.assert_awaited_once_with(*args)
+
+
+async def test_unread_notifications_are_filtered_locally_not_sent_as_a_moodle_parameter() -> None:
+    # message_popup_get_popup_notifications has no `status` parameter: Moodle answered
+    # `invalidparameter` to every default call (seen live on cv.usc.es).
+    gateway = FakeStudentGateway(
+        result={
+            "notifications": [
+                {"id": 1, "subject": "Nova tarefa", "read": False},
+                {"id": 2, "subject": "Xa lida", "read": True},
+            ],
+            "unreadcount": 1,
+        }
+    )
+
+    result = await _service_with(gateway).list_notifications("unread", 0, 20)
+
+    assert gateway.invocations == [
+        (
+            "message_popup_get_popup_notifications",
+            {"useridto": 5, "newestfirst": True, "limit": 20, "offset": 0},
+        )
+    ]
+    assert [item["id"] for item in result["result"]["notifications"]] == [1]
+    assert result["status_filter"] == "unread"

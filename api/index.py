@@ -1,6 +1,13 @@
+"""Vercel adapter: Vercel's Python runtime serves this module's ``app``.
+
+All behaviour lives in ``mcp_usc.http_app``, which runs the same way on any host.
+Vercel rewrites the public routes to ``/api/index?__mcp_usc_route=...`` (see
+vercel.json); this shim restores the original path before delegating. Vercel sets
+``VERCEL=1``, so the app is always read-only here.
+"""
+
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -11,16 +18,9 @@ _SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-# Vercel exposes only /tmp as a writable filesystem. platformdirs reads
-# XDG_DATA_HOME when Settings builds the optional browser/data paths.
-os.environ.setdefault("XDG_DATA_HOME", "/tmp")
+from mcp_usc.http_app import create_app  # noqa: E402
 
-_DEFAULT_AUTH_TOKEN_SHA256 = (
-    "a0b1dcd52f59c6d84cd49ada3bdbb4be7c7428ae1a1d9cedba91dbdd8461c294"
-)
-os.environ.setdefault("MCP_AUTH_TOKEN_SHA256", _DEFAULT_AUTH_TOKEN_SHA256)
-
-from mcp_usc.vercel_app import app as _mcp_app  # noqa: E402
+_mcp_app = create_app()
 
 _ROUTE_QUERY_KEY = "__mcp_usc_route"
 _ROUTE_PATHS = {

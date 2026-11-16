@@ -4,6 +4,97 @@ Los cambios relevantes de `mcp-usc` se documentan aquí. El proyecto sigue
 [Versionado Semántico](https://semver.org/lang/es/) durante la fase beta: una versión menor puede
 ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente.
 
+## [Sin publicar]
+
+### Para cualquier grado
+
+- `get_official_exam_dates` y `get_my_official_exam_schedule` funcionan para cualquier grado de la
+  USC: localizan cada código G en los planes oficiales (primero en los grados del perfil, luego en
+  todo el catálogo) y leen las fechas de la ficha de la materia. El cruce curado del doble grado
+  queda como opción con `degree_keys`; `degree_urls` acota la búsqueda;
+- nueva `get_my_subjects_timetable`: horario semanal solo de las asignaturas del alumno, aunque sean
+  de varios cursos o grados (SICUE, dobles titulaciones, optativas), desde Moodle, el perfil o
+  `subject_codes`, filtrado por identificador exacto de materia;
+- los planes en extinción que el catálogo ya no anuncia (p. ej. `grao-medicina` junto a
+  `grao-medicina-2a-edicion`) se descubren junto a su grado y solo si publican plan para el curso;
+- el plan de estudios incluye curso y semestre de cada materia (65 de 65 grados verificados);
+- el perfil solo exige el grado: el curso es opcional y admite `extra_degree_urls` y
+  `subject_codes`; `mcp-usc setup` ya no obliga a elegir curso;
+- los horarios aceptan tutorías, tipos lectivos nuevos o sin indicar, filtros de TFG y prácticas
+  y semestres sin semanas publicadas (de 15 a 39 de 39 consultas correctas en una muestra de 20
+  grados);
+- planes y catálogo se guardan seis horas en caché y la ubicación de cada código también, así que
+  las consultas repetidas bajan a segundos.
+
+### Añadido
+
+- instalación en un paso con `uv tool install` y asistente `mcp-usc setup`: login con el Chrome o
+  Edge instalado, perfil académico guardado en la carpeta de configuración del usuario y registro
+  en Claude Desktop, Claude Code o Codex con confirmación;
+- `mcp-usc client-config`, que muestra la configuración exacta para cada cliente;
+- modo HTTP independiente del proveedor: `mcp-usc serve --transport http`, factoría ASGI
+  `mcp_usc.http_app:create_app`, `Dockerfile` probado en CI y adaptador de Vercel;
+- `MCP_AUTH_TOKEN_FILE`, y escrituras por HTTP opcionales con `MCP_USC_ALLOW_WRITES` en un único
+  proceso persistente;
+- referencias de recursos firmadas (`MCP_USC_STATE_SECRET`) que no dependen de la memoria del
+  proceso;
+- fechas de examen desde la ficha oficial de cada materia cuando el calendario del centro no la
+  incluye (`evidence.source = "subject_sheet"`);
+- login sin Chrome ni Edge: prueba los motores de Playwright ya descargados y ofrece descargar uno
+  solo para el login (WebKit en macOS, Chromium en el resto), o `mcp-usc login --install-browser`.
+
+### Cambiado
+
+- el modo HTTP de solo lectura publica únicamente las 49 lecturas puras en vez de anunciar
+  herramientas que fallaban al llamarlas;
+- conexiones HTTP reutilizadas entre llamadas e identidad de Moodle cacheada cinco minutos por
+  credencial; `auth_status` sigue comprobándola siempre;
+- «mi horario» muestra por defecto la semana actual (hora de Madrid) en lugar de la primera del
+  semestre;
+- el curso académico y el semestre se infieren con la fecha de Madrid, no la del servidor;
+- User-Agent único con la versión real del paquete;
+- la caché pública ya funciona contra usc.gal: su `no-cache` por defecto de Drupal no anula la TTL
+  local (solo `no-store` impide guardar) y `Vary` solo bloquea cabeceras que dependen del llamante;
+  las consultas repetidas bajan de 0,3-20 s a 25-500 ms sin peticiones;
+- respuestas más pequeñas: el resumen de caché solo detalla recursos degradados y las fechas de
+  examen ya no se repiten en `candidates` y `evidence` (−53 % en una consulta de 7 materias).
+- `list_pending_work` y `list_upcoming_events` solo traen atrasadas del curso académico actual,
+  aplican el filtro de curso antes del límite y recortan el enunciado a 400 caracteres (el
+  completo sigue en `get_work_item`): en una cuenta real, de ~17.000 a ~7.600 tokens;
+- `auth_status` comprueba siempre la sesión, pero la identidad interna usa la caché;
+- el login asistido no consulta el Campus mientras la ventana está en Microsoft.
+
+### Corregido
+
+- con `uv tool install` (sin lockfile) llegaba soupsieve 4, que no busca dentro de
+  `<template>`: fallaban todos los horarios, planes y calendarios. Se fija `soupsieve<3` y el CI
+  prueba también sin lockfile;
+- `list_notifications` fallaba siempre con `invalidparameter`: Moodle no admite `status`, ahora se
+  filtra en local;
+- horarios de la ETSE y de cualquier curso con materias anuales: el filtro «Anual» hacía fallar
+  todo el horario como «semestres ambiguos»;
+- la tabla de exámenes de las fichas de materia no se leía porque está dentro de un `<template>`;
+- fechas de clases erróneas cuando la semana publicada no empieza en lunes;
+- entrega en modo sesión imposible cuando la tarea no exige declaración de autoría;
+- archivos de entrega por REST releídos tras la confirmación: ahora se suben exactamente los bytes
+  confirmados;
+- nombres de archivo duplicados o no válidos detectados en la vista previa y no tras consumir el
+  token;
+- `force_new` y los parámetros no admitidos de `finish_quiz` en modo sesión se rechazan antes de
+  emitir el token;
+- respuestas a debates «para todos los participantes» en foros con grupos cuando Moodle las
+  permite;
+- `extract_academic_year` ignoraba un curso válido tras una fecha anterior;
+- la caché pública se desactivaba con cualquier cabecera `Vary`;
+- el rastreador de fuentes de exámenes podía seguir enlaces y redirecciones a otros hosts USC.
+
+### Seguridad
+
+- `api/index.py` ya no lleva un hash de token fijo: el verificador se configura por entorno y un
+  token corto o inválido impide arrancar;
+- el cliente HTTP compartido nunca guarda cookies de respuesta, así que una credencial no puede
+  filtrarse a la petición de otra.
+
 ## [0.11.0] - 2026-08-25
 
 ### Añadido

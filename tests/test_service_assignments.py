@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,33 @@ async def test_changed_file_after_preview_is_rejected_before_upload(tmp_path: Pa
             preview["confirmation_token"],
         )
     assert len(gateway.calls) == call_count
+
+
+async def test_rest_upload_sends_exactly_the_confirmed_bytes(tmp_path: Path) -> None:
+    document = tmp_path / "entrega.txt"
+    document.write_bytes(b"confirmed")
+
+    class MutatingGateway(FakeAssignmentGateway):
+        async def invoke(self, function: str, arguments: Mapping[str, Any]) -> Any:
+            if function == "core_files_get_unused_draft_itemid":
+                # The file changes after confirmation, while network calls are in flight.
+                document.write_bytes(b"tampered!")
+                return {"itemid": 91, "contextid": 55, "userid": 5, "warnings": []}
+            if function == "core_files_upload":
+                self.calls.append((function, arguments))
+                return [{"itemid": 91, "filepath": "/", "filename": "entrega.txt"}]
+            return await super().invoke(function, arguments)
+
+    gateway = MutatingGateway("file")
+    service = _service_with(gateway, tmp_path)
+    preview = await service.preview_replace_submission_files(8, ["entrega.txt"])
+
+    await service.replace_submission_files(8, ["entrega.txt"], preview["confirmation_token"])
+
+    uploads = [call for call in gateway.calls if call[0] == "core_files_upload"]
+    assert uploads
+    for _, arguments in uploads:
+        assert base64.b64decode(arguments["filecontent"]) == b"confirmed"
 
 
 async def test_submit_assignment_has_separate_preview_and_write(tmp_path: Path) -> None:

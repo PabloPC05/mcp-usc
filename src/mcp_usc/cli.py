@@ -4,9 +4,16 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import sys
 
-from .campus import CampusError, interactive_login
+from .campus import (
+    CampusError,
+    LoginBrowserUnavailable,
+    install_login_browser,
+    interactive_login,
+    login_browser_download_engine,
+)
 from .diagnostics import build_diagnostic
 from .service import UscService
 from .session_auth import SessionImportError, forget_session_cookie, import_session_cookie
@@ -16,11 +23,43 @@ from .settings import Settings
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MCP local para el Campus Virtual de la USC")
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("serve", help="Inicia el servidor MCP por STDIO")
+    serve = subparsers.add_parser(
+        "serve", help="Inicia el servidor MCP (STDIO por defecto, o HTTP con --transport http)"
+    )
+    serve.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default=os.getenv("MCP_USC_TRANSPORT", "stdio"),
+        help="stdio para un cliente local; http para servirlo en red (requiere MCP_AUTH_TOKEN)",
+    )
+    serve.add_argument(
+        "--host",
+        default=os.getenv("MCP_USC_HOST", "127.0.0.1"),
+        help="Interfaz HTTP (por defecto 127.0.0.1; 0.0.0.0 dentro de un contenedor)",
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("MCP_USC_PORT", "8000")),
+        help="Puerto HTTP (por defecto 8000)",
+    )
+    subparsers.add_parser(
+        "setup",
+        help="Asistente: inicia sesión, guarda tu grado y conecta Claude/Codex",
+    )
+    subparsers.add_parser(
+        "client-config",
+        help="Muestra cómo añadir este servidor a Claude Desktop, Claude Code o Codex",
+    )
     login = subparsers.add_parser(
         "login", help="Abre un navegador temporal para completar Microsoft/MFA"
     )
     login.add_argument("--timeout", type=int, default=900, help="Tiempo máximo en segundos")
+    login.add_argument(
+        "--install-browser",
+        action="store_true",
+        help="Si no hay Chrome ni Edge, descarga un navegador solo para el login",
+    )
     subparsers.add_parser(
         "import-session",
         help="Importa MoodleSession mediante una entrada oculta, sin Playwright",
@@ -57,6 +96,16 @@ async def _status() -> int:
     return 0
 
 
+def _confirm_browser_download() -> bool:
+    if not sys.stdin.isatty():
+        return False
+    engine = login_browser_download_engine()
+    answer = input(
+        f"No hay Chrome ni Edge. ¿Descargo un navegador ({engine}) solo para el login? [S/n] "
+    )
+    return answer.strip().casefold() in {"", "s", "si", "sí", "y", "yes"}
+
+
 def _print_json(value: object, *, compact: bool = False) -> None:
     if compact:
         print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
@@ -66,14 +115,43 @@ def _print_json(value: object, *, compact: bool = False) -> None:
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.command in (None, "serve"):
+    if args.command is None or (args.command == "serve" and args.transport == "stdio"):
         from .server import run
 
         run()
         return
-    if args.command == "login":
+    if args.command == "serve":
+        from .http_app import HttpConfigError, run_http
+
         try:
-            result = asyncio.run(interactive_login(Settings.from_env(), args.timeout))
+            run_http(args.host, args.port)
+        except HttpConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
+    if args.command == "setup":
+        from .setup_wizard import run_setup
+
+        try:
+            raise SystemExit(asyncio.run(run_setup()))
+        except (KeyboardInterrupt, EOFError):
+            print("\nConfiguración cancelada.", file=sys.stderr)
+            raise SystemExit(130) from None
+    if args.command == "client-config":
+        from .setup_wizard import client_config_text, server_command
+
+        print(client_config_text(server_command()))
+        return
+    if args.command == "login":
+        settings = Settings.from_env()
+        try:
+            try:
+                result = asyncio.run(interactive_login(settings, args.timeout))
+            except LoginBrowserUnavailable:
+                if not (args.install_browser or _confirm_browser_download()):
+                    raise
+                install_login_browser()
+                result = asyncio.run(interactive_login(settings, args.timeout))
         except (CampusError, TimeoutError) as exc:
             print(str(exc), file=sys.stderr)
             raise SystemExit(1) from exc

@@ -1,6 +1,6 @@
 # Inventario de herramientas MCP
 
-La versión 0.11.0 expone 91 herramientas. Este documento enumera el contrato público completo; el
+La versión 0.11.0 expone 92 herramientas. Este documento enumera el contrato público completo; el
 servidor también lo devuelve agrupado mediante `describe_mcp_usc` y un test lo compara con el
 inventario STDIO real.
 
@@ -98,12 +98,13 @@ Los cuatro recursos y cuatro prompts añadidos en v0.9 se documentan por separad
 | `list_usc_degrees` | R | Titulaciones enlazadas por el catálogo oficial actual. |
 | `list_degree_timetables` | R | Descubre páginas de horario por centro, plan y curso desde una titulación oficial. |
 | `get_degree_class_timetable` | R | Resuelve la titulación elegida y agrega su semana lectiva oficial por centros. |
-| `get_my_class_timetable` | R | Usa el perfil académico local para consultar el horario sin repetir titulación, curso, plan ni grupos. |
+| `get_my_class_timetable` | R | Horario de un curso completo según el perfil (grado y curso). |
+| `get_my_subjects_timetable` | R | Horario solo de mis asignaturas, de cualquier curso o grado (Moodle, perfil o `subject_codes`). |
 | `locate_usc_subject_codes` | R | Localiza códigos exactos en planes oficiales, con filtros opcionales. |
-| `list_official_exam_degrees` | R | Ediciones y crosswalks de calendarios estructurados admitidos. |
+| `list_official_exam_degrees` | R | Crosswalks curados opcionales de calendarios de centro (`degree_keys`). |
 | `list_official_exam_subjects` | R | Materias oficiales de un grado y curso académico. |
-| `get_official_exam_dates` | R | Convocatorias estructuradas para códigos y curso explícitos. |
-| `get_my_official_exam_schedule` | R | Cruza cursos Moodle con códigos y calendarios oficiales admitidos. |
+| `get_official_exam_dates` | R | Fechas de examen de materias de cualquier grado por código G y curso académico. |
+| `get_my_official_exam_schedule` | R | Fechas de examen de las materias de mis cursos Moodle, de cualquier grado. |
 
 Las fechas conservan `source_url`, curso académico, plan/centro y evidencia. Un conflicto se devuelve
 como conflicto: la herramienta no elige una fecha por parecido del nombre.
@@ -185,7 +186,7 @@ cada llamada comprueba su contrato y falla cerrado.
 
 ## Catálogo genérico
 
-Además de estas 91 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
+Además de estas 92 herramientas, `call_student_read` puede acceder a 192 funciones Moodle incluidas
 expresamente en una allowlist. `execute_student_action` admite 12 acciones genéricas acotadas. El
 [estudio de capacidades](student-capability-study.md) documenta las 301 funciones evaluadas, sus
 efectos y las diferencias entre versiones Moodle.

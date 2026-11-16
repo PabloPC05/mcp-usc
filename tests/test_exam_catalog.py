@@ -47,3 +47,10 @@ def test_academic_year_validation_requires_consecutive_years() -> None:
         normalise_academic_year("2025-2026")
     with pytest.raises(ValueError, match="consecutivos"):
         normalise_academic_year("2025/2027")
+
+
+def test_extract_academic_year_skips_invalid_matches_before_a_valid_one() -> None:
+    assert (
+        extract_academic_year("Actualizado 2025-12-31. Curso 2025/2026") == "2025/2026"
+    )
+    assert extract_academic_year("Actualizado 2025-12-31") is None

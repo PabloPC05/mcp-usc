@@ -280,3 +280,76 @@ async def test_ssrf_and_unsafe_paths_are_rejected_before_http(url: str) -> None:
     with pytest.raises(UnsafeUrlError):
         await UscStudyPlanClient(transport=httpx.MockTransport(handler)).fetch_study_plan(url)
     assert calls == 0
+
+
+def test_endpoint_links_inside_vue_templates_are_found() -> None:
+    # Exactly how usc.gal nests them (2026-11-16). soupsieve 3+ does not match template
+    # contents with select(): keep this test so a dependency bump cannot hide it.
+    from mcp_usc.study_plans import discover_study_plan_endpoint
+
+    page = "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/dobre-grao-x-0"
+    html = """
+      <usc-dropdown-filter label="Curso"><template v-slot:default="slotProps">
+        <li><a class="use-ajax" href="/gl/course/78/study-plan-by-course/20872">Curso 2027/2028</a></li>
+        <li><a class="use-ajax" href="/gl/course/77/study-plan-by-course/20872">Curso 2026/2027</a></li>
+        <li><a class="use-ajax" href="/gl/course/76/study-plan-by-course/20872">Curso 2025/2026</a></li>
+      </template></usc-dropdown-filter>
+    """
+
+    assert discover_study_plan_endpoint(html, page, "2026/2027") == (
+        "https://www.usc.gal/gl/course/77/study-plan-by-course/20872"
+    )
+
+
+def test_plan_subjects_carry_their_course_and_semester() -> None:
+    # The live markup (2026-11-16): one accordion item per course whose header reads
+    # "1ro curso", "3ro curso"...; the semester is one of the specs, or absent.
+    html = """
+    <div id="study-plan-by-course"><usc-accordion class="school-year school-year-1">
+      <usc-accordion-item :is-open="false"><span>1ro curso</span>
+        <article class="ml-academic-subject">
+          <h3 class="at-title"><a href="/gl/estudos/graos/ciencias/grao-matematicas/20262027/algebra-1-2-3">Álxebra</a></h3>
+          <ul class="academic-subject-specs-list"><li>G1012101</li><li>Formación básica</li>
+            <li>Primeiro semestre</li><li>6 créditos</li></ul>
+        </article>
+      </usc-accordion-item>
+      <usc-accordion-item :is-open="false"><span>3ro curso</span>
+        <article class="ml-academic-subject">
+          <h3 class="at-title"><a href="/gl/estudos/graos/ciencias/grao-matematicas/20262027/topoloxia-4-5-6">Topoloxía</a></h3>
+          <ul class="academic-subject-specs-list"><li>G1012301</li><li>Obrigatorio</li>
+            <li>Segundo semestre</li><li>6 créditos</li></ul>
+        </article>
+        <article class="ml-academic-subject">
+          <h3 class="at-title"><a href="/gl/estudos/graos/ciencias/grao-matematicas/20262027/tfg-7-8-9">Traballo Fin de Grao</a></h3>
+          <ul class="academic-subject-specs-list"><li>G1012399</li><li>Obrigatorio</li>
+            <li>Anual</li><li>12 créditos</li></ul>
+        </article>
+      </usc-accordion-item>
+    </usc-accordion></div>
+    """
+
+    subjects = {item.code: item for item in parse_study_plan_html(html, ENDPOINT)}
+
+    assert (subjects["G1012101"].course_number, subjects["G1012101"].semester) == (1, 1)
+    assert (subjects["G1012301"].course_number, subjects["G1012301"].semester) == (3, 2)
+    assert (subjects["G1012399"].course_number, subjects["G1012399"].semester) == (3, None)
+
+
+def test_course_header_inside_a_vue_template_is_read() -> None:
+    subjects = parse_study_plan_html(PLAN_HTML, ENDPOINT)
+
+    assert {subject.course_number for subject in subjects} == {1}
+    assert {subject.semester for subject in subjects} == {None}
+
+
+def test_plan_without_course_headers_leaves_the_course_unknown() -> None:
+    html = """
+    <div id="study-plan-by-course">
+      <h3 class="at-title"><a href="/gl/estudos/graos/ciencias/grao-matematicas/20262027/a-1">A</a></h3>
+      <ul class="academic-subject-specs-list"><li>G1012101</li><li>6 créditos</li></ul>
+    </div>
+    """
+
+    [subject] = parse_study_plan_html(html, ENDPOINT)
+
+    assert subject.course_number is None

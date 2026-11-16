@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from mcp_usc import service as service_module
 from mcp_usc.campus import CampusCapabilityUnavailable
 from mcp_usc.confirmations import ACTION_CONFIRMATIONS
 from mcp_usc.service import UscService
@@ -76,7 +75,6 @@ class FakeCollaborationGateway:
 
 @pytest.fixture(autouse=True)
 def clear_resource_references() -> None:
-    service_module._RESOURCE_REFERENCES.clear()
     ACTION_CONFIRMATIONS.clear()
 
 

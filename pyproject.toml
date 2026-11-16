@@ -19,6 +19,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Education",
 ]
 dependencies = [
@@ -28,6 +29,9 @@ dependencies = [
   "mcp>=1.29,<2",
   "platformdirs>=4.3,<5",
   "pypdf>=5,<7",
+  # usc.gal renders its filter links inside Vue <template> elements; soupsieve 3+
+  # stopped matching template contents with select(), which broke every USC parser.
+  "soupsieve>=2.5,<3",
   "tzdata>=2025.2",
 ]
 

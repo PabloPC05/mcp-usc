@@ -58,6 +58,7 @@ _SENSITIVE_NAMES = frozenset({"access_token", "apikey", "password", "sesskey", "
 _MAX_FIELDS = 600
 _MAX_PAYLOAD_BYTES = 2_000_000
 _MAX_REPOSITORIES = 30
+_STATEMENT_FIELD = "submissionstatement"
 _ASSIGN_PATH = "/mod/assign/view.php"
 _DRAFT_MANAGER_PATH = "/repository/draftfiles_manager.php"
 _FILE_PICKER_PATH = "/repository/filepicker.php"
@@ -869,7 +870,19 @@ class MoodleSessionForms:
                 "unsafe_confirmation_form",
                 "No se encontro la confirmacion POST esperada; no se envio nada",
             )
-        payload, error = self._payload(form, confirmation_values)
+        values = dict(confirmation_values or {})
+        if _STATEMENT_FIELD in values:
+            if _STATEMENT_FIELD not in form.visible_fields:
+                # Courses that require no statement render no checkbox: send nothing for it.
+                del values[_STATEMENT_FIELD]
+            elif values[_STATEMENT_FIELD] is not True:
+                return _diagnostic(
+                    "submit_assignment",
+                    "confirmation_fields_required",
+                    "Moodle exige aceptar la declaracion de entrega y no se acepto; "
+                    "no se envio nada",
+                )
+        payload, error = self._payload(form, values)
         if error or payload is None:
             return _diagnostic(
                 "submit_assignment", "confirmation_fields_required", error or "Campos no validos"

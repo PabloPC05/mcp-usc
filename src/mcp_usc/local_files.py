@@ -7,6 +7,17 @@ from typing import Any
 from .settings import Settings
 
 
+def _validate_filename(name: str) -> None:
+    """Apply the strictest filename rules enforced later by the REST and session uploads."""
+
+    if (
+        name in {"", ".", ".."}
+        or any(ord(char) < 32 or ord(char) == 127 or char in "/\\:" for char in name)
+        or len(name.encode("utf-8")) > 255
+    ):
+        raise ValueError("El nombre del archivo no es válido para Moodle")
+
+
 def inspect_upload_files(settings: Settings, paths: list[str] | None) -> list[dict[str, Any]]:
     requested = paths or []
     if len(requested) > 20:
@@ -28,6 +39,7 @@ def inspect_upload_files(settings: Settings, paths: list[str] | None) -> list[di
     inspected: list[dict[str, Any]] = []
     total_size = 0
     seen: set[Path] = set()
+    seen_names: set[str] = set()
     for raw_path in requested:
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise ValueError("Cada ruta de archivo debe ser una cadena no vacía")
@@ -45,6 +57,10 @@ def inspect_upload_files(settings: Settings, paths: list[str] | None) -> list[di
         if resolved in seen:
             raise ValueError("No se puede adjuntar el mismo archivo dos veces")
         seen.add(resolved)
+        _validate_filename(resolved.name)
+        if resolved.name.casefold() in seen_names:
+            raise ValueError("Los nombres de archivo deben ser únicos (sin distinguir mayúsculas)")
+        seen_names.add(resolved.name.casefold())
         size = resolved.stat().st_size
         total_size += size
         if size > settings.max_upload_bytes or total_size > settings.max_upload_bytes:

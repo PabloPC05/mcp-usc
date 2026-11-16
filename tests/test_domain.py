@@ -1,6 +1,8 @@
+from datetime import datetime, timedelta
+
 import pytest
 
-from mcp_usc.domain import normalise_course, normalise_event
+from mcp_usc.domain import MADRID, normalise_course, normalise_event
 from mcp_usc.service import UscService
 
 
@@ -56,3 +58,76 @@ async def test_list_events_rejects_values_above_moodle_page_limit() -> None:
             course_ids=None,
             limit=51,
         )
+
+
+class _TimelineGateway:
+    """Timeline as Moodle returns it: oldest first, at most `limit` events."""
+
+    def __init__(self, events: list[dict]) -> None:
+        self.events = events
+        self.requests: list[tuple[int, int, int]] = []
+
+    async def action_events(self, start: int, end: int, limit: int) -> list[dict]:
+        self.requests.append((start, end, limit))
+        return [event for event in self.events if start <= event["timesort"] <= end][:limit]
+
+
+def _event(event_id: int, course_id: int, when: datetime, description: str = "") -> dict:
+    return {
+        "id": event_id,
+        "name": f"Tarea {event_id}",
+        "description": description,
+        "courseid": course_id,
+        "timesort": int(when.timestamp()),
+        "timestart": int(when.timestamp()),
+    }
+
+
+def _service_with(gateway: _TimelineGateway) -> UscService:
+    service = object.__new__(UscService)
+    service._campus = lambda: gateway
+    return service
+
+
+async def test_overdue_work_is_limited_to_the_current_academic_year() -> None:
+    now = datetime.now(MADRID)
+    last_year = now - timedelta(days=400)
+    gateway = _TimelineGateway(
+        [_event(1, 3, last_year), _event(2, 3, now - timedelta(days=3)),
+         _event(3, 3, now + timedelta(days=2))]
+    )
+
+    result = await _service_with(gateway).list_events(
+        days=21, include_overdue=True, course_ids=None, limit=50
+    )
+
+    assert [item["event_id"] for item in result] == [2, 3]
+    start = datetime.fromtimestamp(gateway.requests[0][0], MADRID)
+    assert (start.month, start.day) == (9, 1)
+    assert start <= now - timedelta(days=3)
+
+
+async def test_course_filter_is_applied_before_the_result_limit() -> None:
+    now = datetime.now(MADRID)
+    others = [_event(i, 9, now + timedelta(hours=i)) for i in range(1, 6)]
+    wanted = _event(99, 3, now + timedelta(days=4))
+    gateway = _TimelineGateway([*others, wanted])
+
+    result = await _service_with(gateway).list_events(
+        days=21, include_overdue=False, course_ids=[3], limit=2
+    )
+
+    assert [item["event_id"] for item in result] == [99]
+    assert gateway.requests[0][2] == 50
+
+
+async def test_listing_shortens_descriptions_but_keeps_the_marker() -> None:
+    now = datetime.now(MADRID)
+    gateway = _TimelineGateway([_event(1, 3, now + timedelta(days=1), "palabra " * 400)])
+
+    [item] = await _service_with(gateway).list_events(
+        days=21, include_overdue=False, course_ids=None, limit=50
+    )
+
+    assert len(item["description"]) <= 401
+    assert item["description_truncated"] is True

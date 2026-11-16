@@ -5,8 +5,8 @@ from . import __version__
 PROJECT_URL = "https://github.com/PabloPC05/mcp-usc"
 
 TOOL_INVENTORY = {
-    "total": 91,
-    "read_only": 49,
+    "total": 92,
+    "read_only": 50,
     "previews": 21,
     "effects": 20,
     "stateful_reads": 1,
@@ -93,6 +93,7 @@ CAPABILITY_TOOL_GROUPS = {
         "list_degree_timetables",
         "get_degree_class_timetable",
         "get_my_class_timetable",
+        "get_my_subjects_timetable",
         "locate_usc_subject_codes",
         "list_official_exam_degrees",
         "list_official_exam_subjects",

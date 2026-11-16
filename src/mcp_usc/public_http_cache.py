@@ -99,6 +99,14 @@ def _safe_validator(value: str | None) -> str | None:
     return value
 
 
+# Request headers whose value depends on the caller (pages and AJAX fragments may share
+# a URL with different Accept/X-Requested-With). Every other header is either sent with
+# one fixed value (User-Agent, Accept-Encoding) or never sent by this anonymous client
+# (Cookie, Authorization, Accept-Language, X-Consumer-ID...), so it cannot split a URL
+# into variants.
+_CALLER_DEPENDENT_REQUEST_HEADERS = frozenset({"accept", "x-requested-with"})
+
+
 def _cache_permitted(headers: Mapping[str, str]) -> bool:
     directives = {
         part.strip().casefold().split("=", 1)[0]
@@ -107,29 +115,26 @@ def _cache_permitted(headers: Mapping[str, str]) -> bool:
     }
     if "no-store" in directives:
         return False
-    # This cache is deliberately keyed only by URL. Until request-header variants
-    # are part of the key, storing any Vary response could serve the wrong
-    # representation to a future consumer.
+    # This cache is keyed only by URL, so a Vary response is safe unless it names a header
+    # whose value this client changes between callers, or `*`.
     vary = {part.strip().casefold() for part in headers.get("vary", "").split(",") if part.strip()}
-    return not vary
+    return "*" not in vary and not vary & _CALLER_DEPENDENT_REQUEST_HEADERS
 
 
 def _cache_policy(
     headers: Mapping[str, str], configured_ttl: float
 ) -> tuple[bool, float, bool]:
-    values = [part.strip().casefold() for part in headers.get("cache-control", "").split(",")]
-    names = {value.split("=", 1)[0] for value in values if value}
-    effective_ttl = configured_ttl
-    for value in values:
-        if not value.startswith("max-age="):
-            continue
-        raw = value.split("=", 1)[1].strip().strip('"')
-        if raw.isdigit():
-            effective_ttl = min(effective_ttl, float(int(raw)))
-    if "no-cache" in names:
-        effective_ttl = 0.0
-    allow_stale = not names.intersection({"must-revalidate", "no-cache"})
-    return _cache_permitted(headers), effective_ttl, allow_stale
+    """Freshness for anonymous, schema-validated public USC documents.
+
+    usc.gal (Drupal) answers every page with `no-cache, private, must-revalidate,
+    max-age=0` and no validators, whatever the content. Honouring that literally made
+    every call re-download everything, so the configured TTL (default 300 s, 0 disables
+    caching) is the freshness lifetime here and stale copies may back up an outage.
+    `no-store` stays binding: such responses are never kept. `private` is fine because
+    this is a single-client cache.
+    """
+
+    return _cache_permitted(headers), configured_ttl, True
 
 
 class PublicHttpCache:
@@ -143,6 +148,7 @@ class PublicHttpCache:
         max_entries: int = 128,
         max_total_bytes: int = 64_000_000,
         clock: Callable[[], float] = time.monotonic,
+        reference_ttl_seconds: float = 21_600.0,
     ) -> None:
         if isinstance(ttl_seconds, bool) or not 0 <= ttl_seconds <= 86_400:
             raise ValueError("ttl_seconds debe estar entre 0 y 86400")
@@ -155,7 +161,14 @@ class PublicHttpCache:
             raise ValueError("max_entries debe estar entre 1 y 4096")
         if isinstance(max_total_bytes, bool) or not 1 <= max_total_bytes <= 512_000_000:
             raise ValueError("max_total_bytes debe estar entre 1 y 512000000")
+        if (
+            isinstance(reference_ttl_seconds, bool)
+            or not 0 <= reference_ttl_seconds <= 604_800
+        ):
+            raise ValueError("reference_ttl_seconds debe estar entre 0 y 604800")
         self.ttl_seconds = float(ttl_seconds)
+        # Study plans and the degree catalogue change at most once per academic year.
+        self.reference_ttl_seconds = float(reference_ttl_seconds)
         self.stale_if_error_seconds = float(stale_if_error_seconds)
         self.max_entries = max_entries
         self.max_total_bytes = max_total_bytes
@@ -228,21 +241,31 @@ class PublicHttpCache:
             headers["If-Modified-Since"] = entry.last_modified
         return headers
 
+    def _ttl(self, reference: bool) -> float:
+        """Lifetime for one request; 0 (operator opt-out) disables caching for everything."""
+
+        if self.ttl_seconds == 0:
+            return 0.0
+        return self.reference_ttl_seconds if reference else self.ttl_seconds
+
     def revalidated(
-        self, key: str, headers: Mapping[str, str] | None = None
+        self,
+        key: str,
+        headers: Mapping[str, str] | None = None,
+        reference: bool = False,
     ) -> PublicHttpResponse:
         entry = self._entry(key)
         if entry is None:
             raise PublicHttpError("La fuente devolvió 304 sin una entrada de caché")
         now_wall, now_mono = _wall_now(), self._clock()
-        ttl_seconds, allow_stale = entry.ttl_seconds, entry.allow_stale
+        lifetime, allow_stale = entry.ttl_seconds, entry.allow_stale
         if headers is not None and "cache-control" in headers:
-            _, ttl_seconds, allow_stale = _cache_policy(headers, self.ttl_seconds)
+            _, lifetime, allow_stale = _cache_policy(headers, self._ttl(reference))
         updated = replace(
             entry,
             validated_at_wall=now_wall,
             validated_at_mono=now_mono,
-            ttl_seconds=ttl_seconds,
+            ttl_seconds=lifetime,
             allow_stale=allow_stale,
             etag=_safe_validator((headers or {}).get("etag")) or entry.etag,
             last_modified=(
@@ -286,9 +309,10 @@ class PublicHttpCache:
         final_url: str,
         content: bytes,
         headers: Mapping[str, str],
+        reference: bool = False,
     ) -> PublicHttpResponse:
         now_wall = _wall_now()
-        cacheable, effective_ttl, allow_stale = _cache_policy(headers, self.ttl_seconds)
+        cacheable, effective_ttl, allow_stale = _cache_policy(headers, self._ttl(reference))
         metadata = PublicHttpCacheMetadata(
             status="fresh",
             requested_url=key,
@@ -381,7 +405,11 @@ class SafePublicHttpFetcher:
         headers: Mapping[str, str],
         validate_redirect: Callable[[str], None],
         validate: Callable[[PublicHttpResponse], None],
+        reference: bool = False,
     ) -> PublicHttpResponse:
+        """GET through the cache; ``reference`` documents (study plans, the degree
+        catalogue) live for the cache's longer reference lifetime."""
+
         key = url
         cached = self.cache.fresh(key)
         if cached is not None:
@@ -414,7 +442,9 @@ class SafePublicHttpFetcher:
                             "GET", current, headers=request_headers
                         ) as response:
                             if response.status_code == 304:
-                                result = self.cache.revalidated(key, response.headers)
+                                result = self.cache.revalidated(
+                                    key, response.headers, reference
+                                )
                                 if len(result.content) > self.max_bytes:
                                     raise PublicHttpError(
                                         f"La respuesta supera el límite de {self.max_bytes} bytes"
@@ -468,6 +498,7 @@ class SafePublicHttpFetcher:
                                 final_url=current,
                                 content=b"".join(chunks),
                                 headers=response.headers,
+                                reference=reference,
                             )
                             validate(candidate)
                             self.cache.commit(candidate)
@@ -520,9 +551,9 @@ def public_cache_summary(
     reasons = list(
         dict.fromkeys(item.degraded_reason for item in items if item.degraded_reason)
     )
-    visible_resources = resources
-    if len(resources) > 20:
-        visible_resources = [item for item in resources if item["status"] == "degraded"][:20]
+    # Per-resource detail only matters when something went wrong; listing every fresh
+    # page cost the model hundreds of tokens per call for no information.
+    visible_resources = [item for item in resources if item["status"] == "degraded"][:20]
     status_counts = {
         status: sum(item.status == status for item in items)
         for status in ("fresh", "revalidated", "degraded")
@@ -540,7 +571,8 @@ def public_cache_summary(
         "final_url": items[0].final_url if len(items) == 1 else None,
         "degraded_reason": "; ".join(reasons) if reasons else None,
         "resources": visible_resources,
-        "resources_truncated": len(visible_resources) < len(resources),
+        "resources_truncated": len(visible_resources)
+        < sum(item["status"] == "degraded" for item in resources),
     }
 
 

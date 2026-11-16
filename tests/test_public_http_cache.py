@@ -56,7 +56,8 @@ class Clock:
 
 async def test_fresh_hit_expiry_and_conditional_304_are_visible() -> None:
     clock = Clock()
-    cache = PublicHttpCache(ttl_seconds=10, clock=clock)
+    # These cases use a study-plan client to exercise generic TTL semantics.
+    cache = PublicHttpCache(ttl_seconds=10, reference_ttl_seconds=10, clock=clock)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -100,6 +101,7 @@ async def test_transient_failure_uses_bounded_stale_data_as_degraded() -> None:
     clock = Clock()
     cache = PublicHttpCache(
         ttl_seconds=5,
+        reference_ttl_seconds=5,
         stale_if_error_seconds=20,
         clock=clock,
     )
@@ -132,7 +134,9 @@ async def test_transient_failure_uses_bounded_stale_data_as_degraded() -> None:
 
 async def test_schema_change_is_explicit_never_cached_and_keeps_last_valid_entry() -> None:
     clock = Clock()
-    cache = PublicHttpCache(ttl_seconds=1, stale_if_error_seconds=30, clock=clock)
+    cache = PublicHttpCache(
+        ttl_seconds=1, reference_ttl_seconds=1, stale_if_error_seconds=30, clock=clock
+    )
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -237,8 +241,9 @@ async def test_server_failures_and_no_store_responses_are_never_cached() -> None
     assert no_store_cache.entry_count == 0
 
 
-async def test_no_cache_is_revalidated_and_private_is_allowed_locally() -> None:
-    cache = PublicHttpCache(ttl_seconds=300)
+async def test_origin_no_cache_headers_do_not_disable_the_local_ttl() -> None:
+    # usc.gal sends these Drupal defaults on every page, whatever the content.
+    cache = PublicHttpCache(ttl_seconds=300, reference_ttl_seconds=300)
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -257,15 +262,15 @@ async def test_no_cache_is_revalidated_and_private_is_allowed_locally() -> None:
     first = await client.fetch_study_plan(ENDPOINT, academic_year="2025/2026")
     second = await client.fetch_study_plan(ENDPOINT, academic_year="2025/2026")
 
-    assert calls == 2
+    assert calls == 1
     assert cache.entry_count == 1
-    assert first.cache_metadata[0].ttl_seconds == 0
-    assert second.cache_metadata[0].cache_hit is False
+    assert first.cache_metadata[0].ttl_seconds == 300
+    assert second.cache_metadata[0].cache_hit is True
     summary = public_cache_summary((*first.cache_metadata, *second.cache_metadata))
     assert summary["status"] == "fresh"
-    assert summary["hit_count"] == 0
+    assert summary["hit_count"] == 1
     assert "etag" not in summary
-    assert "etag" not in summary["resources"][0]  # type: ignore[index]
+    assert summary["resources"] == []  # only degraded resources are detailed
 
 
 async def test_vary_response_is_not_cached_without_a_variant_aware_key() -> None:
@@ -278,7 +283,7 @@ async def test_vary_response_is_not_cached_without_a_variant_aware_key() -> None
         return httpx.Response(
             200,
             content=_payload(),
-            headers={"content-type": "application/json", "vary": "Accept-Language"},
+            headers={"content-type": "application/json", "vary": "Accept"},
         )
 
     client = UscStudyPlanClient(transport=httpx.MockTransport(handler), cache=cache)
@@ -287,6 +292,45 @@ async def test_vary_response_is_not_cached_without_a_variant_aware_key() -> None
 
     assert calls == 2
     assert cache.entry_count == 0
+
+
+@pytest.mark.parametrize(
+    ("vary", "cached"),
+    [
+        ("Accept-Encoding", True),
+        ("accept-encoding, User-Agent", True),
+        # Exactly what usc.gal sends; this anonymous client never sends X-Consumer-ID.
+        ("X-Consumer-ID,Accept-Encoding", True),
+        ("Accept-Encoding, Cookie", True),
+        ("Authorization", True),
+        ("Accept-Language", True),
+        ("Accept", False),
+        ("X-Requested-With", False),
+        ("*", False),
+        ("Accept-Encoding, *", False),
+    ],
+)
+async def test_vary_is_cacheable_unless_it_names_caller_dependent_headers(
+    vary: str, cached: bool
+) -> None:
+    cache = PublicHttpCache()
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            content=_payload(),
+            headers={"content-type": "application/json", "vary": vary},
+        )
+
+    client = UscStudyPlanClient(transport=httpx.MockTransport(handler), cache=cache)
+    await client.fetch_study_plan(ENDPOINT, academic_year="2025/2026")
+    await client.fetch_study_plan(ENDPOINT, academic_year="2025/2026")
+
+    assert calls == (1 if cached else 2)
+    assert cache.entry_count == (1 if cached else 0)
 
 
 async def test_response_and_cache_limits_fail_closed() -> None:
@@ -345,10 +389,7 @@ async def test_concurrent_identical_queries_are_collapsed_after_validation() -> 
 
     client = UscStudyPlanClient(transport=httpx.MockTransport(handler), cache=cache)
     results = await asyncio.gather(
-        *(
-            client.fetch_study_plan(ENDPOINT, academic_year="2025/2026")
-            for _ in range(20)
-        )
+        *(client.fetch_study_plan(ENDPOINT, academic_year="2025/2026") for _ in range(20))
     )
     assert calls == 1
     assert all(result.subjects[0].code == "G1012106" for result in results)
@@ -367,3 +408,20 @@ async def test_concurrent_identical_queries_are_collapsed_after_validation() -> 
 def test_invalid_cache_limits_are_rejected(field: str, value: int) -> None:
     with pytest.raises(ValueError):
         PublicHttpCache(**{field: value})
+
+
+async def test_study_plans_use_the_longer_reference_lifetime_unless_caching_is_off() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_payload(), headers={"content-type": "application/json"})
+
+    cache = PublicHttpCache(ttl_seconds=300)
+    plan = await UscStudyPlanClient(
+        transport=httpx.MockTransport(handler), cache=cache
+    ).fetch_study_plan(ENDPOINT, academic_year="2025/2026")
+    assert plan.cache_metadata[0].ttl_seconds == 21_600
+
+    disabled = PublicHttpCache(ttl_seconds=0)
+    plan = await UscStudyPlanClient(
+        transport=httpx.MockTransport(handler), cache=disabled
+    ).fetch_study_plan(ENDPOINT, academic_year="2025/2026")
+    assert plan.cache_metadata[0].ttl_seconds == 0

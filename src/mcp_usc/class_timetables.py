@@ -20,6 +20,8 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from . import USER_AGENT
+from .academic_profile import madrid_today
 from .exam_catalog import normalise_academic_year
 from .public_http_cache import (
     DEFAULT_PUBLIC_HTTP_CACHE,
@@ -32,7 +34,6 @@ from .public_http_cache import (
 )
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.10 (+https://github.com/PabloPC05/mcp-usc)"
 _ALLOWED_HOSTS = frozenset({"www.usc.gal", "usc.gal"})
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
@@ -545,9 +546,25 @@ def _filter_links(
             raise ClassTimetableParseError("Un filtro del horario contiene enlaces duplicados")
         seen.add(candidate)
         links.append((label, candidate))
-    if (not links and not allow_empty) or len(links) > 60:
+    if not links and not allow_empty:
+        raise ClassTimetableParseError("El filtro del horario no publica ninguna opción")
+    if len(links) > 200:
         raise ClassTimetableParseError("Número de opciones de horario fuera de los límites")
     return links
+
+
+_SEMESTER_WORD = re.compile(r"\b(?:semestre|cuadrimestre|cuatrimestre|semester)\b")
+
+
+def _semester_number(label: str) -> int | None:
+    digit = re.search(r"\b([12])\s*(?:º|o|ª|a|er|do|st|nd)?\b", label)
+    if digit:
+        return int(digit.group(1))
+    if re.search(r"\b(?:primeiro|primer|primero|first)\b", label):
+        return 1
+    if re.search(r"\b(?:segundo|second)\b", label):
+        return 2
+    return None
 
 
 def _semester_links(payload: str | bytes, base_url: str) -> dict[int, tuple[str, str]]:
@@ -562,7 +579,8 @@ def _semester_links(payload: str | bytes, base_url: str) -> dict[int, tuple[str,
         base_url,
         allow_empty=True,
     )
-    for position, item in enumerate(links, 1):
+    unnamed: list[tuple[str, str]] = []
+    for item in links:
         endpoint_match = _SEMESTER_AJAX_PATH.fullmatch(_safe_path(item[1]))
         assert endpoint_match is not None
         if any(
@@ -572,11 +590,22 @@ def _semester_links(payload: str | bytes, base_url: str) -> dict[int, tuple[str,
             raise ClassTimetableParseError(
                 "Un filtro de semestre pertenece a otro horario"
             )
-        match = re.search(r"\b([12])\s*[ºoªa]?", _fold(item[0]))
-        semester = int(match.group(1)) if match else position
-        if semester not in {1, 2} or semester in result:
+        label = _fold(item[0])
+        if not _SEMESTER_WORD.search(label):
+            # "Anual", "Traballos Fin de Grao…", "Prácticas en Empresas…" sit next to the
+            # semesters (live on usc.gal) and are not semesters.
+            if not re.search(r"[a-z]", label):
+                unnamed.append(item)
+            continue
+        semester = _semester_number(label)
+        if semester is None or semester in result:
             raise ClassTimetableParseError("El filtro de semestres es ambiguo")
         result[semester] = item
+    if not result and unnamed:
+        # Legacy pages with bare, unlabelled options: keep their published order.
+        if len(unnamed) > 2:
+            raise ClassTimetableParseError("El filtro de semestres es ambiguo")
+        result = {position: item for position, item in enumerate(unnamed, 1)}
     return result
 
 
@@ -632,11 +661,14 @@ def _week_links(
     base_match = _SEMESTER_AJAX_PATH.fullmatch(_safe_path(base_url))
     if base_match is None:
         raise UnsafeUrlError("Se esperaba un endpoint semestral de horario")
+    # A semester without classes (only final projects or internships, virtual degrees)
+    # publishes an empty week filter: that is "no data", not a schema change.
     for label, endpoint in _filter_links(
         payload,
         "#course-detail-controller-week-filter",
         "week_ajax",
         base_url,
+        allow_empty=True,
     ):
         endpoint_match = _WEEK_AJAX_PATH.fullmatch(_safe_path(endpoint))
         assert endpoint_match is not None
@@ -662,20 +694,30 @@ def _subject_url(value: str, source_url: str) -> str:
     return candidate
 
 
+_KNOWN_ACTIVITY_CLASSES = (
+    ("expository", "expository-group"),
+    ("laboratory", "laboratory-group"),
+    ("seminar", "seminar-group"),
+    ("tutorship", "tutorship-group"),
+)
+_ACTIVITY_CLASS = re.compile(r"([a-z][a-z0-9]{1,30})-group")
+
+
 def _activity_type(item: Tag) -> str:
-    classes = set(item.get("class", []))
-    matches = [
-        value
-        for value, class_name in (
-            ("expository", "expository-group"),
-            ("laboratory", "laboratory-group"),
-            ("seminar", "seminar-group"),
-        )
-        if class_name in classes
-    ]
+    classes = [str(value) for value in item.get("class", [])]
+    matches = [value for value, class_name in _KNOWN_ACTIVITY_CLASSES if class_name in classes]
     if not matches:
-        raise ClassTimetableParseError("Una sesión no indica ningún tipo lectivo reconocido")
-    return "+".join(matches)
+        # A teaching type this parser does not know yet (seen live: "tutorship-group")
+        # is reported by name instead of discarding the whole timetable.
+        matches = [
+            match.group(1)
+            for value in classes
+            if not value.startswith("is-group-")
+            and (match := _ACTIVITY_CLASS.fullmatch(value)) is not None
+        ]
+    # Some sessions publish no type at all (seen live: clinical practice "CLI_EEES05" in
+    # Optics); the session, its group and room are still real.
+    return "+".join(matches) if matches else "unspecified"
 
 
 def _group_and_room(spec: Tag) -> tuple[str | None, str | None]:
@@ -713,7 +755,11 @@ def parse_timetable_html(
         weekday_number = _WEEKDAYS.get(_fold(weekday))
         if weekday_number is None:
             raise ClassTimetableParseError(f"Día de la semana no reconocido: {weekday}")
-        session_date = week.start + timedelta(days=weekday_number)
+        # Published weeks need not start on Monday (e.g. "Del 10 al 14"): place the
+        # weekday inside [week.start, week.end] instead of assuming a Monday start.
+        session_date = week.start + timedelta(
+            days=(weekday_number - week.start.weekday()) % 7
+        )
         if session_date > week.end:
             raise ClassTimetableParseError("Un día cae fuera del intervalo semanal anunciado")
         for item in day.select("li:has(> article.ml-academic-subject)"):
@@ -799,6 +845,7 @@ class UscClassTimetableClient:
         cache_stale_if_error_seconds: float = 3_600.0,
         cache_max_entries: int = 128,
         cache_max_total_bytes: int = 64_000_000,
+        today: Callable[[], date] | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout debe ser positivo")
@@ -823,6 +870,8 @@ class UscClassTimetableClient:
                 )
             )
         self.cache = cache
+        # Injectable clock (Europe/Madrid date) used to pick the default week.
+        self._today = today or madrid_today
         self._fetcher = SafePublicHttpFetcher(
             timeout=timeout,
             max_bytes=max_bytes,
@@ -841,7 +890,7 @@ class UscClassTimetableClient:
             raise UnsafeUrlError("Tipo de URL de horario inesperado")
         is_ajax = kind.endswith("_ajax")
         headers = {
-            "User-Agent": _USER_AGENT,
+            "User-Agent": USER_AGENT,
             "Accept": "application/json" if is_ajax else "text/html",
         }
         if is_ajax:
@@ -1308,7 +1357,41 @@ class UscClassTimetableClient:
         weeks = _week_links(
             semester_payload.content, semester_endpoint, academic_year, semester
         )
-        selected_week = weeks[0]
+        if not weeks:
+            return {
+                "status": "no_data",
+                "academic_year": academic_year,
+                "semester": semester,
+                "week": None,
+                "course_number": int(timetable_match.group("course")),
+                "program_id": int(timetable_match.group("program")),
+                "timetable_url": page.metadata.final_url,
+                "schedule_endpoint_url": semester_endpoint,
+                "available_academic_years": list(available_years),
+                "available_semesters": sorted(semesters),
+                "available_weeks": [],
+                "available_group_codes": [],
+                "filters": {
+                    "group_codes": list(groups),
+                    "subject_query": subject_query,
+                    "date_in_week": requested_date.isoformat() if requested_date else None,
+                },
+                "sessions": [],
+                "count": 0,
+                "note": "La fuente oficial no publica semanas lectivas para ese semestre.",
+                "cache": public_cache_summary(
+                    [page.metadata, year_payload.metadata, semester_payload.metadata]
+                ),
+                "read_only": True,
+                "authentication_required": False,
+                "content_is_untrusted": True,
+            }
+        # Default to the published week containing today (Europe/Madrid); fall back to the
+        # first published week when today is outside every published week.
+        today = self._today()
+        selected_week = next(
+            (item for item in weeks if item.start <= today <= item.end), weeks[0]
+        )
         if requested_date is not None:
             selected_week = next(
                 (item for item in weeks if item.start <= requested_date <= item.end),

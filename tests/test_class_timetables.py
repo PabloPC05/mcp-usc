@@ -516,3 +516,157 @@ def test_schedule_preserves_multiple_official_activity_types() -> None:
     assert {session.activity_type for session in sessions} == {
         "expository+laboratory"
     }
+
+
+def test_schedule_maps_weekday_inside_a_week_that_does_not_start_on_monday() -> None:
+    # 2025-09-10 is a Wednesday: "Miércoles" must be the 10th, not the 12th.
+    week = TimetableWeek(
+        "Del 10 al 14 de Septiembre", date(2025, 9, 10), date(2025, 9, 14), WEEK_1_URL
+    )
+
+    wednesday = parse_timetable_html(_schedule_html(day="Miércoles"), WEEK_1_URL, week=week)
+    friday = parse_timetable_html(_schedule_html(day="Viernes"), WEEK_1_URL, week=week)
+
+    assert {session.date for session in wednesday} == {date(2025, 9, 10)}
+    assert {session.date for session in friday} == {date(2025, 9, 12)}
+    with pytest.raises(ClassTimetableParseError, match="fuera del intervalo"):
+        parse_timetable_html(_schedule_html(day="Lunes"), WEEK_1_URL, week=week)
+
+
+def _default_week_client(
+    requests: list[httpx.Request], *, today: date
+) -> UscClassTimetableClient:
+    canonical_html = f'<a href="{YEAR_URL}">Curso 2025/2026</a>'
+    year_payload = _payload(
+        {"command": "UpdateAcademicCourse", "value": "Curso 2025/2026"},
+        _insert("#course-detail-controller-call-filter", _semester_filter()),
+        _insert("#course-detail-controller", _schedule_html()),
+    )
+    semester_payload = _payload(
+        _insert("#course-detail-controller-week-filter", _week_filter()),
+        _insert("#course-detail-controller", _schedule_html()),
+    )
+    week_payload = _payload(
+        _insert("#course-detail-controller", _schedule_html("Álgebra Lineal", "Martes"))
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        url = str(request.url)
+        if url == TIMETABLE_URL:
+            return httpx.Response(200, text=canonical_html)
+        payloads = {
+            YEAR_URL: year_payload,
+            SEMESTER_URL: semester_payload,
+            WEEK_2_URL: week_payload,
+        }
+        if url in payloads:
+            return httpx.Response(
+                200, content=payloads[url], headers={"content-type": "application/json"}
+            )
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    return UscClassTimetableClient(transport=httpx.MockTransport(handler), today=lambda: today)
+
+
+async def test_default_week_is_the_published_week_containing_today() -> None:
+    requests: list[httpx.Request] = []
+    client = _default_week_client(requests, today=date(2025, 9, 17))
+
+    result = await client.fetch_timetable(
+        TIMETABLE_URL, academic_year="2025/2026", semester=1
+    )
+
+    assert result["week"]["start_date"] == "2025-09-15"
+    assert result["schedule_endpoint_url"] == WEEK_2_URL
+    assert result["filters"]["date_in_week"] is None
+
+
+async def test_default_week_falls_back_to_first_week_when_today_is_outside() -> None:
+    requests: list[httpx.Request] = []
+    client = _default_week_client(requests, today=date(2026, 3, 1))
+
+    result = await client.fetch_timetable(
+        TIMETABLE_URL, academic_year="2025/2026", semester=1
+    )
+
+    assert result["week"]["start_date"] == "2025-09-08"
+    assert result["schedule_endpoint_url"] == SEMESTER_URL
+
+
+def test_semester_filter_with_an_annual_option_keeps_both_semesters() -> None:
+    # Exactly what usc.gal publishes for ETSE courses in 2026/2027.
+    from mcp_usc.class_timetables import _semester_links
+
+    annual_url = "/es/course/widget/76/course-detail-controller-call-filter/5060/19955-2/27"
+    payload = _payload(
+        _insert(
+            "#course-detail-controller-call-filter",
+            _semester_filter().replace(
+                "</usc-dropdown-filter>", f'<a href="{annual_url}">Anual</a></usc-dropdown-filter>'
+            ),
+        )
+    )
+
+    links = _semester_links(payload, YEAR_URL)
+
+    assert sorted(links) == [1, 2]
+    assert links[1][1] == SEMESTER_URL
+
+
+def test_semester_filter_ignores_final_project_and_internship_options() -> None:
+    # usc.gal, ETSE 4th year 2026/2027: two semesters plus two non-semester filters.
+    from mcp_usc.class_timetables import _semester_links
+
+    extra = (
+        '<a href="/es/course/widget/76/course-detail-controller-call-filter/5060/19955-2/32">'
+        "Traballos Fin de Grao e Máster</a>"
+        '<a href="/es/course/widget/76/course-detail-controller-call-filter/5060/19955-2/33">'
+        "Prácticas en Empresas de Grao e Máster</a>"
+    )
+    payload = _payload(
+        _insert(
+            "#course-detail-controller-call-filter",
+            _semester_filter().replace("</usc-dropdown-filter>", extra + "</usc-dropdown-filter>"),
+        )
+    )
+
+    links = _semester_links(payload, YEAR_URL)
+
+    assert sorted(links) == [1, 2]
+    assert links[1][1] == SEMESTER_URL
+
+
+@pytest.mark.parametrize(
+    ("classes", "expected"),
+    [
+        ("target-items-selector tutorship-group is-group-grupoti-ects03", "tutorship"),
+        ("expository-group laboratory-group is-group-grupo-cle-01", "expository+laboratory"),
+        ("fieldwork-group is-group-grupo-cs-01", "fieldwork"),
+        ("is-group-grupocli-eees05", "unspecified"),
+    ],
+)
+def test_session_types_include_tutorships_and_unknown_new_types(
+    classes: str, expected: str
+) -> None:
+    # Live (2026/27): a single "tutorship-group" session used to discard whole timetables.
+    from bs4 import BeautifulSoup
+
+    from mcp_usc.class_timetables import _activity_type
+
+    item = BeautifulSoup(f'<li class="{classes}"></li>', "html.parser").li
+
+    assert _activity_type(item) == expected
+
+
+def test_semester_without_published_weeks_is_empty_not_a_schema_change() -> None:
+    from mcp_usc.class_timetables import _week_links
+
+    payload = _payload(
+        _insert(
+            "#course-detail-controller-week-filter",
+            "<usc-dropdown-filter></usc-dropdown-filter>",
+        )
+    )
+
+    assert _week_links(payload, SEMESTER_URL, "2025/2026", 1) == ()

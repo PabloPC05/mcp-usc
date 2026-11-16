@@ -227,6 +227,41 @@ async def test_prepare_and_upload_draft_file_with_validated_path(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_upload_draft_file_uses_supplied_bytes_instead_of_rereading(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "entrega.txt"
+    document.write_bytes(b"changed on disk")
+    invoke = FakeInvoke({"core_files_upload": [{"itemid": 91, "filename": "entrega.txt"}]})
+
+    result = await upload_draft_file(
+        invoke, _draft(), document, allowed_root=tmp_path, content=b"confirmed"
+    )
+
+    assert result["size"] == 9
+    assert invoke.calls[0][1]["filecontent"] == base64.b64encode(b"confirmed").decode()
+
+
+@pytest.mark.asyncio
+async def test_upload_draft_file_rejects_file_grown_past_limit_before_invoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = tmp_path / "entrega.txt"
+    document.write_bytes(b"1234")
+    invoke = FakeInvoke({})
+    # Simulate growth between validation and read: stat said 4 bytes, disk holds more.
+    monkeypatch.setattr(
+        "mcp_usc.assignments._validated_local_file", lambda *_a, **_k: (document, 4)
+    )
+    document.write_bytes(b"x" * 100)
+
+    with pytest.raises(ValueError, match="supera el límite"):
+        await upload_draft_file(invoke, _draft(), document, allowed_root=tmp_path, max_bytes=10)
+
+    assert invoke.calls == []
+
+
+@pytest.mark.asyncio
 async def test_upload_endpoint_error_is_not_reported_as_success(tmp_path: Path) -> None:
     document = tmp_path / "entrega.txt"
     document.write_bytes(b"contenido")
