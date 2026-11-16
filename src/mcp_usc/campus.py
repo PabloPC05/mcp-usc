@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import http.cookiejar
 import json
 import mimetypes
 import re
+import subprocess
+import sys
 import time
 import uuid
+import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -18,13 +23,14 @@ from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunp
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from . import USER_AGENT
 from .credentials import CredentialStore
 from .security import html_to_text, validate_usc_url
 from .session_auth import SESSION_CREDENTIAL_NAME
 from .session_forms import FormResponse, FormUpload, MoodleSessionForms
 from .settings import Settings
 
-_USER_AGENT = "mcp-usc/0.4 (+https://github.com/PabloPC05/mcp-usc)"
+_USER_AGENT = USER_AGENT
 _ANNOUNCEMENT_TERMS = (
     "announcement",
     "anuncio",
@@ -123,6 +129,10 @@ class CampusGateway(ABC):
         """Return functions advertised by the configured token, if discoverable."""
         return None
 
+    async def verify_status(self) -> dict[str, Any]:
+        """Like status(), but always proves the credential against Moodle (no cache)."""
+        return await self.status()
+
     async def invoke_course_module(self, function: str, arguments: Mapping[str, Any]) -> Any:
         """Use a course-module ID only on transports that explicitly support it."""
         raise CampusProtocolError(
@@ -194,6 +204,163 @@ def _moodle_file_url(url: str, base_url: str, *, webservice: bool) -> str:
             target = "/webservice/pluginfile.php" if webservice else "/pluginfile.php"
             return urlunparse(("https", base.netloc, f"{target}{suffix}", "", "", ""))
     raise ValueError("La URL no corresponde a un archivo Moodle permitido")
+
+
+class _DiscardingCookieJar(http.cookiejar.CookieJar):
+    """Cookie jar that never stores cookies received in responses.
+
+    One pooled client serves every credential in the process, including per-request
+    credentials in HTTP mode. Credentials are therefore sent explicitly on each request
+    and nothing a response sets may leak into a later request.
+    """
+
+    def extract_cookies(self, response: Any, request: Any) -> None:
+        del response, request
+
+    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:
+        del cookie
+
+
+_POOLED_CLIENTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _pooled_client() -> httpx.AsyncClient:
+    """Return the event loop's keep-alive client, so tool calls reuse TLS connections."""
+
+    loop = asyncio.get_running_loop()
+    client = _POOLED_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            follow_redirects=False,
+            cookies=_DiscardingCookieJar(),
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                keepalive_expiry=30.0,
+            ),
+        )
+        _POOLED_CLIENTS[loop] = client
+    return client
+
+
+class _ScopedClient:
+    """Per-operation view of the pooled client with fixed headers and timeout."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        timeout: float,
+        headers: Mapping[str, str],
+    ) -> None:
+        self._client = client
+        self._timeout = timeout
+        self._headers = dict(headers)
+
+    def _merged(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        merged = dict(self._headers)
+        if headers:
+            merged.update(headers)
+        return merged
+
+    async def get(
+        self, url: str, *, headers: Mapping[str, str] | None = None, **kwargs: Any
+    ) -> httpx.Response:
+        return await self._client.get(
+            url, headers=self._merged(headers), timeout=self._timeout, **kwargs
+        )
+
+    async def post(
+        self, url: str, *, headers: Mapping[str, str] | None = None, **kwargs: Any
+    ) -> httpx.Response:
+        return await self._client.post(
+            url, headers=self._merged(headers), timeout=self._timeout, **kwargs
+        )
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        return await self._client.request(
+            method, url, headers=self._merged(headers), timeout=self._timeout, **kwargs
+        )
+
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return self._client.stream(
+            method, url, headers=self._merged(headers), timeout=self._timeout, **kwargs
+        )
+
+    def build_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Request:
+        return self._client.build_request(
+            method, url, headers=self._merged(headers), timeout=self._timeout, **kwargs
+        )
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        return await self._client.send(request, **kwargs)
+
+
+@asynccontextmanager
+async def _scoped_client(
+    *, timeout: float, headers: Mapping[str, str]
+) -> AsyncIterator[_ScopedClient]:
+    yield _ScopedClient(_pooled_client(), timeout=timeout, headers=headers)
+
+
+# Moodle identity (REST site info, session sesskey/user) is stable for a credential, so
+# it is cached briefly per process instead of being refetched on every tool call. Keys
+# are digests; the credentials themselves are never stored here.
+_IDENTITY_CACHE_TTL_SECONDS = 300.0
+_IDENTITY_CACHE_MAX_ENTRIES = 32
+_SITE_INFO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SESSION_CONTEXT_CACHE: dict[str, tuple[float, _SessionContext]] = {}
+
+
+def _identity_cache_key(base_url: str, credential: str) -> str:
+    return hashlib.sha256(f"{base_url}\0{credential}".encode()).hexdigest()
+
+
+def _identity_cache_get(cache: dict[str, tuple[float, Any]], key: str) -> Any | None:
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    if entry[0] <= time.monotonic():
+        cache.pop(key, None)
+        return None
+    return entry[1]
+
+
+def _identity_cache_put(cache: dict[str, tuple[float, Any]], key: str, value: Any) -> None:
+    now = time.monotonic()
+    for expired in [item for item, (expires, _) in cache.items() if expires <= now]:
+        cache.pop(expired, None)
+    while len(cache) >= _IDENTITY_CACHE_MAX_ENTRIES:
+        cache.pop(next(iter(cache)))
+    cache[key] = (now + _IDENTITY_CACHE_TTL_SECONDS, value)
+
+
+def clear_identity_caches() -> None:
+    _SITE_INFO_CACHE.clear()
+    _SESSION_CONTEXT_CACHE.clear()
 
 
 async def _read_limited_response(response: httpx.Response, max_bytes: int) -> bytes:
@@ -420,18 +587,19 @@ class RestMoodleGateway(CampusGateway):
         }
         try:
             async with (
-                httpx.AsyncClient(
+                _scoped_client(
                     timeout=self.settings.request_timeout_seconds,
-                    follow_redirects=False,
                     headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
                 ) as client,
                 client.stream("POST", self._endpoint, data=form) as response,
             ):
                 if response.is_redirect:
+                    self._forget_identity()
                     raise AuthenticationRequired(
                         "Moodle redirigió la petición REST; revisa el token."
                     )
                 if response.status_code in {401, 403}:
+                    self._forget_identity()
                     raise AuthenticationRequired("Moodle rechazó el token configurado.")
                 if response.status_code >= 400:
                     raise CampusError(
@@ -447,12 +615,25 @@ class RestMoodleGateway(CampusGateway):
         except (json.JSONDecodeError, ValueError) as exc:
             raise CampusProtocolError("Moodle devolvió una respuesta REST no válida.") from exc
         if isinstance(payload, Mapping) and (payload.get("exception") or payload.get("errorcode")):
-            raise _moodle_error(payload, function)
+            error = _moodle_error(payload, function)
+            if isinstance(error, AuthenticationRequired):
+                self._forget_identity()
+            raise error
         return payload
+
+    def _identity_key(self) -> str:
+        return _identity_cache_key(self.base_url, self.settings.moodle_token or "")
+
+    def _forget_identity(self) -> None:
+        self._site_info = None
+        _SITE_INFO_CACHE.pop(self._identity_key(), None)
 
     async def invoke(self, function: str, arguments: Mapping[str, Any] | None = None) -> Any:
         if function == "core_files_upload":
             return await self._upload_draft_file(arguments or {})
+        if function == "core_webservice_get_site_info" and not arguments:
+            # Identity checks before writes reuse the cached site info of this token.
+            return dict(await self._info())
         return await self._call(function, arguments)
 
     async def _upload_draft_file(self, arguments: Mapping[str, Any]) -> Any:
@@ -478,9 +659,8 @@ class RestMoodleGateway(CampusGateway):
             urljoin(f"{self.base_url}/", "webservice/upload.php"), campus=True
         )
         try:
-            async with httpx.AsyncClient(
+            async with _scoped_client(
                 timeout=self.settings.request_timeout_seconds,
-                follow_redirects=False,
                 headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
             ) as client:
                 response = await client.post(
@@ -509,9 +689,8 @@ class RestMoodleGateway(CampusGateway):
         safe_url = _moodle_file_url(url, self.base_url, webservice=True)
         try:
             async with (
-                httpx.AsyncClient(
+                _scoped_client(
                     timeout=self.settings.request_timeout_seconds,
-                    follow_redirects=False,
                     headers={"User-Agent": _USER_AGENT},
                 ) as client,
                 client.stream("GET", safe_url, params={"token": token}) as response,
@@ -530,12 +709,19 @@ class RestMoodleGateway(CampusGateway):
             raise CampusError("No se pudo descargar el recurso del Campus Virtual.") from None
         return content, media_type, safe_url
 
-    async def _info(self) -> dict[str, Any]:
+    async def _info(self, *, refresh: bool = False) -> dict[str, Any]:
+        if refresh:
+            self._forget_identity()
         if self._site_info is None:
-            payload = await self._call("core_webservice_get_site_info")
-            if not isinstance(payload, Mapping) or not payload.get("userid"):
-                raise CampusProtocolError("Moodle no devolvió la identidad del usuario.")
-            self._site_info = dict(payload)
+            key = self._identity_key()
+            cached = _identity_cache_get(_SITE_INFO_CACHE, key)
+            if cached is None:
+                payload = await self._call("core_webservice_get_site_info")
+                if not isinstance(payload, Mapping) or not payload.get("userid"):
+                    raise CampusProtocolError("Moodle no devolvió la identidad del usuario.")
+                cached = dict(payload)
+                _identity_cache_put(_SITE_INFO_CACHE, key, cached)
+            self._site_info = cached
         return self._site_info
 
     async def require_functions(self, functions: set[str]) -> None:
@@ -569,6 +755,10 @@ class RestMoodleGateway(CampusGateway):
             for item in raw_functions
             if isinstance(item, Mapping) and item.get("name")
         }
+
+    async def verify_status(self) -> dict[str, Any]:
+        await self._info(refresh=True)
+        return await self.status()
 
     async def status(self) -> dict[str, Any]:
         info = await self._info()
@@ -753,14 +943,13 @@ class HttpSessionMoodleGateway(CampusGateway):
             url = f"{url}?{urlencode(query)}"
         return url
 
-    def _client(self, cookie: str) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
+    def _client(self, cookie: str) -> Any:
+        return _scoped_client(
             timeout=self.settings.request_timeout_seconds,
-            follow_redirects=False,
-            cookies={"MoodleSession": cookie},
             headers={
                 "User-Agent": _USER_AGENT,
                 "Accept": "text/html,application/json;q=0.9,*/*;q=0.1",
+                "Cookie": f"MoodleSession={cookie}",
             },
         )
 
@@ -846,9 +1035,21 @@ class HttpSessionMoodleGateway(CampusGateway):
         self._remember_rotated_cookie(response, cookie)
         return response
 
-    async def _session_context(self) -> _SessionContext:
+    def _forget_session_context(self, cookie: str) -> None:
+        self._context = None
+        _SESSION_CONTEXT_CACHE.pop(_identity_cache_key(self.base_url, cookie), None)
+
+    async def _session_context(self, *, refresh: bool = False) -> _SessionContext:
+        cookie = self._session_cookie()
+        cache_key = _identity_cache_key(self.base_url, cookie)
+        if refresh:
+            self._forget_session_context(cookie)
         if self._context is not None:
             return self._context
+        cached = _identity_cache_get(_SESSION_CONTEXT_CACHE, cache_key)
+        if cached is not None:
+            self._context = cached
+            return cached
         # Moodle's dashboard records a dashboard_viewed event even on GET. The preferences
         # landing page exposes the same header session context without that stateful event.
         response = await self._get("user/preferences.php")
@@ -874,9 +1075,19 @@ class HttpSessionMoodleGateway(CampusGateway):
         )
         site_name = _first_text(soup, ".navbar-brand", ".site-name", "title")
         self._context = _SessionContext(sesskey, user_id, user_name, site_name)
+        _identity_cache_put(_SESSION_CONTEXT_CACHE, cache_key, self._context)
         return self._context
 
     async def _ajax(self, function: str, arguments: Mapping[str, Any]) -> Any:
+        cookie = self._session_cookie()
+        try:
+            return await self._ajax_once(function, arguments)
+        except AuthenticationRequired:
+            # A cached sesskey belongs to a session Moodle no longer accepts.
+            self._forget_session_context(cookie)
+            raise
+
+    async def _ajax_once(self, function: str, arguments: Mapping[str, Any]) -> Any:
         context = await self._session_context()
         cookie = self._session_cookie()
         request_payload = [{"index": 0, "methodname": function, "args": dict(arguments)}]
@@ -947,32 +1158,34 @@ class HttpSessionMoodleGateway(CampusGateway):
                 for _ in range(6):
                     request = client.build_request("GET", target)
                     response = await client.send(request, stream=True)
-                    if self._is_auth_failure_response(response):
+                    try:
+                        if self._is_auth_failure_response(response):
+                            self._ensure_authenticated_response(response)
+                        self._remember_rotated_cookie(response, cookie)
+                        if response.is_redirect:
+                            location = response.headers.get("location", "")
+                            if not location:
+                                break
+                            try:
+                                target = _moodle_file_url(
+                                    urljoin(str(response.url), location),
+                                    self.base_url,
+                                    webservice=False,
+                                )
+                            except ValueError as exc:
+                                raise CampusProtocolError(
+                                    "La descarga redirigió fuera de /pluginfile.php."
+                                ) from exc
+                            continue
                         self._ensure_authenticated_response(response)
-                    self._remember_rotated_cookie(response, cookie)
-                    if response.is_redirect:
-                        location = response.headers.get("location", "")
+                        content = await _read_limited_response(response, max_bytes)
+                        self._ensure_authenticated_response(response, content)
+                        media_type = response.headers.get("content-type", "").split(";", 1)[0]
+                        final_url = urlunparse((*urlparse(str(response.url))[:3], "", "", ""))
+                        break
+                    finally:
+                        # The pooled client outlives this call; never leave a stream open.
                         await response.aclose()
-                        if not location:
-                            break
-                        try:
-                            target = _moodle_file_url(
-                                urljoin(str(response.url), location),
-                                self.base_url,
-                                webservice=False,
-                            )
-                        except ValueError as exc:
-                            raise CampusProtocolError(
-                                "La descarga redirigió fuera de /pluginfile.php."
-                            ) from exc
-                        continue
-                    self._ensure_authenticated_response(response)
-                    content = await _read_limited_response(response, max_bytes)
-                    self._ensure_authenticated_response(response, content)
-                    media_type = response.headers.get("content-type", "").split(";", 1)[0]
-                    final_url = urlunparse((*urlparse(str(response.url))[:3], "", "", ""))
-                    await response.aclose()
-                    break
                 else:
                     raise CampusProtocolError("Moodle devolvió demasiadas redirecciones.")
         except CampusError:
@@ -1171,6 +1384,10 @@ class HttpSessionMoodleGateway(CampusGateway):
                 "La sesión HTTP/AJAX no expone de forma segura estas funciones; "
                 "usa un token REST de mínimo privilegio: " + ", ".join(unavailable)
             )
+
+    async def verify_status(self) -> dict[str, Any]:
+        await self._session_context(refresh=True)
+        return await self.status()
 
     async def status(self) -> dict[str, Any]:
         context = await self._session_context()
@@ -1722,6 +1939,64 @@ async def _cookie_is_authenticated(settings: Settings, cookie: str) -> bool:
     return not _looks_like_login(soup, response.url) and bool(_extract_sesskey(soup, response.text))
 
 
+_AUTO_BROWSER_CHANNELS: tuple[str | None, ...] = ("chrome", "msedge", None)
+_LOGIN_RECHECK_SECONDS = 10.0
+
+
+class LoginBrowserUnavailable(CampusError):
+    """No installed or downloaded browser can open the interactive login."""
+
+
+def login_browser_download_engine() -> str:
+    """Engine to download when nothing is installed: WebKit (Safari's engine) on macOS."""
+
+    return "webkit" if sys.platform == "darwin" else "chromium"
+
+
+def install_login_browser() -> str:
+    """Download Playwright's browser for the login only; returns the engine name."""
+
+    engine = login_browser_download_engine()
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", engine],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CampusError(f"No se pudo descargar el navegador de Playwright ({engine}).")
+    return engine
+
+
+def _login_browser_channels(configured: str) -> tuple[str | None, ...]:
+    """Prefer the user's installed Chrome/Edge so no extra browser download is needed."""
+
+    value = configured.strip().casefold()
+    if value in {"", "auto"}:
+        return _AUTO_BROWSER_CHANNELS
+    if value == "chromium":
+        return (None,)
+    return (configured.strip(),)
+
+
+async def _launch_login_browser(playwright: Any, configured_channel: str) -> Any:
+    last_error: Exception | None = None
+    for channel in _login_browser_channels(configured_channel):
+        try:
+            return await playwright.chromium.launch(headless=False, channel=channel)
+        except Exception as exc:  # the channel is not installed on this machine
+            last_error = exc
+    if configured_channel.strip().casefold() in {"", "auto"}:
+        # Engines previously downloaded with `playwright install` also work for the login.
+        for engine in ("webkit", "firefox"):
+            try:
+                return await getattr(playwright, engine).launch(headless=False)
+            except Exception as exc:
+                last_error = exc
+    raise LoginBrowserUnavailable(
+        "No se encontró un navegador para el login (Chrome, Edge o uno de Playwright). "
+        "Ejecuta `mcp-usc login --install-browser` para descargar uno solo para esto."
+    ) from last_error
+
+
 async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str, Any]:
     """Open a visible, ephemeral browser solely to bootstrap MoodleSession."""
 
@@ -1738,10 +2013,12 @@ async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str,
 
     deadline = time.monotonic() + timeout
     session_cookie = ""
+    # Moodle issues a new MoodleSession when the login completes, so a guest cookie that
+    # was already rejected is only re-checked now and then instead of every second.
+    rejected_at: dict[str, float] = {}
     try:
         async with async_playwright() as playwright:
-            channel = None if settings.browser_channel == "chromium" else settings.browser_channel
-            browser = await playwright.chromium.launch(headless=False, channel=channel)
+            browser = await _launch_login_browser(playwright, settings.browser_channel)
             try:
                 context = await browser.new_context()
                 page = await context.new_page()
@@ -1750,20 +2027,35 @@ async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str,
                     wait_until="domcontentloaded",
                     timeout=min(timeout * 1_000, 120_000),
                 )
+                campus_host = urlparse(base_url).hostname
                 while time.monotonic() < deadline:
+                    if not any(
+                        urlparse(open_page.url).hostname == campus_host
+                        for open_page in context.pages
+                    ):
+                        # Still on Microsoft's sign-in pages: nothing to check yet (this
+                        # avoided ~100 Campus requests during one live MFA login).
+                        await asyncio.sleep(1)
+                        continue
                     for cookie in await context.cookies([base_url]):
                         if cookie.get("name") != "MoodleSession" or not cookie.get("value"):
                             continue
                         candidate = str(cookie["value"])
+                        checked = rejected_at.get(candidate)
+                        if checked is not None and time.monotonic() - checked < (
+                            _LOGIN_RECHECK_SECONDS
+                        ):
+                            continue
                         if await _cookie_is_authenticated(settings, candidate):
                             session_cookie = candidate
                             break
+                        rejected_at[candidate] = time.monotonic()
                     if session_cookie:
                         break
                     await asyncio.sleep(1)
             finally:
                 await browser.close()
-    except TimeoutError:
+    except (TimeoutError, CampusError):
         raise
     except Exception as exc:
         raise CampusError("No se pudo completar el login interactivo del Campus Virtual.") from exc

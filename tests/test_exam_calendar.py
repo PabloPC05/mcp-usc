@@ -276,3 +276,46 @@ def test_subject_sheet_preserves_and_normalises_variant_code() -> None:
     """
 
     assert parse_subject_sheet_html(html, SUBJECT_URL).code == "G1012106B"
+
+
+def test_subject_sheet_reads_the_exam_table_inside_the_vue_tab_template() -> None:
+    # usc.gal renders the «Horarios de clases e exames» tab inside a <template>; bs4
+    # leaves template text out of get_text() unless asked for it explicitly.
+    html = """
+      <h1>Administración de Sistemas e Redes</h1>
+      <span class="at-tag is-primary">2026/2027</span>
+      <usc-tabs-body-item name="tab04"><template v-slot:default>
+        <table class="ml-table is-primary"><caption>Exames</caption><tbody>
+          <tr><td>08.01.2027 10:00-14:00</td><td>Grupo /CLE_01</td><td>Aula A1</td></tr>
+          <tr><td>08.01.2027 10:00-14:00</td><td>Grupo /CLIL_02</td><td>Aula A1</td></tr>
+          <tr><td>18.06.2027 10:00-14:00</td><td>Grupo /CLE_01</td><td>Aula A3</td></tr>
+        </tbody></table>
+      </template></usc-tabs-body-item>
+    """
+
+    sheet = parse_subject_sheet_html(html, SUBJECT_URL)
+
+    assert [slot.date_time for slot in sheet.exam_slots] == [
+        "08.01.2027 10:00-14:00",
+        "18.06.2027 10:00-14:00",
+    ]
+    assert sheet.exam_slots[0].groups == ("Grupo /CLE_01", "Grupo /CLIL_02")
+    assert sheet.exam_slots[1].rooms == ("Aula A3",)
+
+
+def test_calendar_year_links_inside_vue_templates_are_found() -> None:
+    from mcp_usc.exam_calendar import discover_calendar_endpoint
+
+    page = "https://www.usc.gal/gl/centro/escola-tecnica-superior-enxenaria/calendarios/convocatorias"
+    html = """
+      <usc-dropdown-filter><template v-slot:default="slotProps">
+        <li><a class="use-ajax" href="/gl/course/78/schedules-exams-calendar/5250"
+              >Curso 2027/2028</a></li>
+        <li><a class="use-ajax" href="/gl/course/77/schedules-exams-calendar/5250"
+              >Curso 2026/2027</a></li>
+      </template></usc-dropdown-filter>
+    """
+
+    assert discover_calendar_endpoint(html, page, "2026/2027").endswith(
+        "/gl/course/77/schedules-exams-calendar/5250"
+    )

@@ -14,6 +14,49 @@ públicas de la USC, siempre con los permisos de tu propia cuenta.
 > Este es un proyecto comunitario independiente. No está desarrollado, respaldado ni operado por
 > la USC. Tus credenciales se guardan localmente y nunca deben publicarse en GitHub.
 
+## Instalación rápida
+
+Tres pasos, en Windows, macOS o Linux. No hace falta clonar nada ni instalar Python a mano.
+
+1. Instala [`uv`](https://docs.astral.sh/uv/getting-started/installation/):
+
+   ```powershell
+   # Windows (PowerShell)
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+
+   ```sh
+   # macOS o Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+2. Instala `mcp-usc` (abre una terminal nueva después del paso 1):
+
+   ```sh
+   uv tool install "mcp-usc[browser-auth] @ https://github.com/PabloPC05/mcp-usc/archive/refs/heads/main.zip"
+   ```
+
+3. Ejecuta el asistente:
+
+   ```sh
+   mcp-usc setup
+   ```
+
+   Te abre el navegador para entrar con tu cuenta USC y el MFA, usando el Chrome o Edge que ya
+   tengas. Después te pregunta tu grado (sirve cualquiera de la USC; el curso es opcional) para
+   «mi horario» y «mis exámenes», y te ofrece añadirlo a Claude Desktop, Claude Code o Codex.
+   Reinicia el asistente y pregúntale, por ejemplo, «¿qué tareas tengo pendientes esta semana?».
+
+Tu sesión del Campus se guarda en el almacén seguro de tu sistema y no sale de tu equipo. No hace
+falta tener git instalado. Para actualizar a la última versión:
+
+```sh
+uv tool install --reinstall --refresh "mcp-usc[browser-auth] @ https://github.com/PabloPC05/mcp-usc/archive/refs/heads/main.zip"
+```
+
+Si la sesión caduca, vuelve a entrar con `mcp-usc login`.
+Para otros clientes MCP, `mcp-usc client-config` muestra la configuración que hay que pegar.
+
 ## Qué puedes pedirle
 
 | Necesidad | Ejemplo de petición |
@@ -22,7 +65,7 @@ públicas de la USC, siempre con los permisos de tu propia cuenta.
 | Seguir una asignatura | «Resume los avisos recientes de AED y enséñame sus materiales.» |
 | Revisar entregas | «¿Qué archivos entregué y qué feedback recibí?» |
 | Preparar exámenes | «¿Cuándo son mis exámenes oficiales del curso 2026/2027?» |
-| Consultar horarios | «¿Qué clases tiene segundo del doble grado esta semana y en qué aulas?» |
+| Consultar horarios | «¿Qué clases tengo esta semana y en qué aulas?» (cualquier grado) |
 | Consultar actividad | «Enséñame mis notas, calendario, mensajes y progreso.» |
 | Actuar con aprobación | «Prepara esta entrega, pero no la envíes hasta que la confirme.» |
 
@@ -31,8 +74,8 @@ consulta correo ni Teams, no eleva privilegios y no actúa como profesorado o ad
 
 ## Estado del proyecto
 
-La versión **0.11.0** es una beta comunitaria: expone **91 herramientas MCP**, cuatro recursos
-pasivos y cuatro prompts guiados. Las herramientas se dividen en 49 lecturas puras, 21
+La versión **0.11.0** es una beta comunitaria: expone **92 herramientas MCP**, cuatro recursos
+pasivos y cuatro prompts guiados. Las herramientas se dividen en 50 lecturas puras, 21
 previsualizaciones, 20 operaciones con efecto y una inspección potencialmente stateful. El catálogo
 interno estudiado cubre 301 capacidades de alumno de Moodle; aparecer en el catálogo no significa
 que la USC o el token de cada persona habiliten todas ellas.
@@ -40,8 +83,8 @@ que la USC o el token de cada persona habiliten todas ellas.
 Tres puntos de entrada ayudan a entender y comprobar la instalación sin contactar con el Campus:
 
 ```powershell
-uv run mcp-usc doctor
-uv run mcp-usc manifest --compact
+mcp-usc doctor
+mcp-usc manifest --compact
 ```
 
 - `describe_mcp_usc`: explica al cliente MCP el propósito, alcance, límites y modelo de seguridad.
@@ -51,12 +94,13 @@ uv run mcp-usc manifest --compact
   determinista; tampoco usa la red.
 
 Para validar de verdad un token o una sesión mediante una lectura HTTP usa después
-`uv run mcp-usc status`.
+`mcp-usc status`.
 
 ## Documentación
 
 - [Primeros pasos](docs/getting-started.md): instalación, autenticación y conexión con un cliente.
-- [Inventario de herramientas](docs/tools.md): las 91 herramientas, tipos y requisitos.
+- [Servirlo por HTTP](docs/deployment.md): servidor propio, contenedor o Vercel, con token.
+- [Inventario de herramientas](docs/tools.md): las 92 herramientas, tipos y requisitos.
 - [Superficie MCP](docs/mcp-surface.md): recursos, prompts y manifiesto local.
 - [Compatibilidad](docs/compatibility.md): sistemas, Python, hosts y transportes Moodle.
 - [Arquitectura](docs/architecture.md): transportes, componentes y fronteras de confianza.
@@ -67,7 +111,8 @@ Para validar de verdad un token o una sesión mediante una lectura HTTP usa desp
 
 ## Principios de diseño
 
-- El servidor MCP usa STDIO; «HTTP-first» describe la conexión entre este proceso y Moodle/USC.
+- El servidor MCP usa STDIO en local y Streamable HTTP cuando se sirve en red
+  ([guía](docs/deployment.md)); «HTTP-first» describe la conexión entre este proceso y Moodle/USC.
 - Las consultas y escrituras normales no automatizan un navegador.
 - Se prefiere la API REST oficial de Moodle cuando hay un token legítimo.
 - Con una cookie `MoodleSession`, las lecturas usan AJAX *same-origin* y descargas directas
@@ -86,35 +131,23 @@ Para validar de verdad un token o una sesión mediante una lectura HTTP usa desp
 No consulta correo ni Teams. Un mensaje interno de Moodle puede generar notificaciones externas
 según la configuración del destinatario; la vista previa lo advierte antes del envío.
 
-## Requisitos
+## Instalación para desarrollo
 
-- Windows, Linux o macOS;
-- Python 3.11 o posterior;
-- [`uv`](https://docs.astral.sh/uv/) recomendado;
-- una cuenta USC activa para los datos privados;
-- opcionalmente, un token de Moodle Web Services que exponga las funciones necesarias.
+Si vas a modificar el código, clona el repositorio:
 
-## Instalación
-
-```powershell
+```sh
 git clone https://github.com/PabloPC05/mcp-usc.git
 cd mcp-usc
-uv sync --extra dev
-```
-
-Esto basta para ejecutar el servidor con un token REST o con una sesión ya almacenada. Instala
-Playwright únicamente si necesitas crear o renovar la sesión mediante el asistente de login:
-
-```powershell
 uv sync --extra dev --extra browser-auth
-uv run playwright install chromium
+uv run mcp-usc setup
 ```
 
-El asistente puede usar Chromium o un Chrome/Edge instalado:
-
-```powershell
-$env:USC_BROWSER_CHANNEL = "chrome" # también "msedge" o "chromium"
-```
+`uv run` usa el entorno del clon; el resto de comandos de este README funcionan igual con ese
+prefijo. El login asistido usa el Chrome o Edge instalado (`USC_BROWSER_CHANNEL=auto`). Si no hay
+ninguno (por ejemplo, solo Safari o Firefox), `mcp-usc login` y `setup` ofrecen descargar una vez un
+navegador solo para el login: WebKit en macOS y Chromium en el resto. Sin preguntar:
+`mcp-usc login --install-browser`. También puedes forzar un canal con `USC_BROWSER_CHANNEL`
+(`chrome`, `msedge` o `chromium`).
 
 ## Autenticación y transportes HTTP
 
@@ -129,7 +162,7 @@ Usa únicamente un token legítimo emitido por Moodle para tu cuenta y servicio:
 
 ```powershell
 $env:USC_MOODLE_TOKEN = "..."
-uv run mcp-usc status
+mcp-usc status
 ```
 
 También puede leerse desde un archivo local protegido:
@@ -146,8 +179,8 @@ Moodle no implica que esté habilitada en el servicio asociado al token.
 Ruta sin Playwright, reutilizando una sesión que ya hayas abierto personalmente en el navegador:
 
 ```powershell
-uv run mcp-usc import-session
-uv run mcp-usc status
+mcp-usc import-session
+mcp-usc status
 ```
 
 En las herramientas de desarrollo del navegador, abre **Aplicación/Almacenamiento > Cookies >
@@ -158,8 +191,8 @@ Preferencias y solo entonces lo guarda en Credential Manager.
 La alternativa asistida abre una ventana visible una sola vez y requiere el extra `browser-auth`:
 
 ```powershell
-uv run mcp-usc login
-uv run mcp-usc status
+mcp-usc login
+mcp-usc status
 ```
 
 Completa personalmente Microsoft Entra y MFA en la ventana visible. El programa extrae solo
@@ -177,12 +210,13 @@ Después del login, todas las operaciones usan `httpx`:
 - ciertas operaciones de tareas y cuestionarios, después de confirmación explícita, usan
   formularios HTML oficiales descubiertos en una respuesta fresca del servidor.
 
-El `sesskey` no se persiste ni se devuelve. Por exigencia del protocolo AJAX puede aparecer en la
+El `sesskey` no se escribe en disco ni se devuelve; el proceso lo conserva en memoria un máximo
+de cinco minutos para no recargar Preferencias en cada llamada. Por exigencia del protocolo AJAX puede aparecer en la
 URL que ve la infraestructura de Moodle. La cookie equivale a una credencial mientras esté vigente:
 si utilizas la importación manual, cópiala únicamente al prompt oculto; nunca la registres, publiques
 ni sincronices. Cuando caduque, repite `mcp-usc import-session` o `mcp-usc login`.
 Para borrar únicamente la copia local, sin enviar un cierre de sesión al Campus, ejecuta
-`uv run mcp-usc forget-session`.
+`mcp-usc forget-session`.
 
 ### Matriz de compatibilidad
 
@@ -237,9 +271,10 @@ antes de crear un borrador o modificar la entrega.
 
 ## Fuentes públicas de grados, horarios y exámenes
 
-El MCP integra por HTTP el catálogo completo de grados y los horarios lectivos que sus centros
-enlazan, además de los calendarios dinámicos de exámenes compatibles de la ETSE y la Facultade de
-Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas ocho herramientas:
+El MCP integra por HTTP el catálogo completo de grados, sus planes de estudio, los horarios
+lectivos que sus centros enlazan y la tabla de exámenes de la ficha de cada materia. Todo funciona
+para **cualquier grado de la USC**; el grado del perfil solo hace las consultas más rápidas. No
+necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas herramientas:
 
 - `list_usc_degrees`: lista las titulaciones enlazadas por el catálogo oficial actual;
 - `locate_usc_subject_codes`: localiza códigos exactos en los planes oficiales de un curso;
@@ -250,9 +285,13 @@ Matemáticas. No necesita Playwright, cookies ni `USC_EXAM_SOURCES` para estas o
   URLs de procedencia;
 - `list_official_exam_degrees`: ediciones y crosswalks institucionales admitidos;
 - `list_official_exam_subjects`: descubre códigos, nombres y fichas para un curso académico;
-- `get_official_exam_dates`: convocatorias estructuradas para códigos y curso académico explícitos;
-- `get_my_official_exam_schedule`: cruza esos calendarios con los códigos de los cursos Moodle,
-  incluidos los ocultos del tablero.
+- `get_official_exam_dates`: fechas oficiales de examen para códigos G de cualquier grado, desde la
+  ficha de cada materia (y, con `degree_keys`, el calendario curado del centro);
+- `get_my_official_exam_schedule`: lo mismo para los códigos de tus cursos Moodle, incluidos los
+  ocultos del tablero;
+- `get_my_subjects_timetable`: horario de la semana solo de tus asignaturas, aunque sean de varios
+  cursos o grados (SICUE, dobles titulaciones, optativas); las saca de Moodle, del perfil o de
+  `subject_codes`.
 
 La versión 0.10 conserva la resolución específica del doble grado y la búsqueda independiente
 en todos los grados actuales. En la comprobación real de 2026/2027 se procesaron las 65 entradas del
@@ -306,41 +345,29 @@ cinco redirecciones y descarga como máximo 15 MB por documento. No hace crawlin
 las fuentes indicadas y sus enlaces inmediatos de examen/PDF. Cada evidencia conserva URL, página
 PDF cuando procede y hora de consulta; las fuentes discrepantes se muestran como conflicto.
 
-## Conectar con Codex
+## Conectar con un cliente MCP
 
-Desde PowerShell en este equipo:
+`mcp-usc setup` lo hace por ti. Si prefieres hacerlo a mano, `mcp-usc client-config` imprime el
+comando para Claude Code y Codex y el bloque JSON para Claude Desktop y otros clientes, con la ruta
+absoluta correcta de tu instalación.
 
-```powershell
-codex mcp add usc-campus -- uv --directory C:\Users\pablo\mcp-usc run mcp-usc serve
-codex mcp list
-```
-
-Para incluir fuentes públicas desde la configuración MCP:
-
-```powershell
-codex mcp remove usc-campus
-codex mcp add usc-campus --env USC_EXAM_SOURCES="https://www.usc.gal/gl/centro/MI_CENTRO/horarios/cursos" -- uv --directory C:\Users\pablo\mcp-usc run mcp-usc serve
-```
-
-Reinicia el cliente o abre una sesión nueva para cargar el servidor. Según la
-[documentación oficial de OpenAI](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), la
-configuración MCP se comparte entre la app de ChatGPT, Codex CLI y la extensión IDE del mismo host.
-
-Activa además la aprobación del host para toda escritura en `%USERPROFILE%\.codex\config.toml`:
+En Codex, activa además la aprobación del host para toda escritura en `~/.codex/config.toml`
+(`%USERPROFILE%\.codex\config.toml` en Windows):
 
 ```toml
 [mcp_servers.usc-campus]
-command = "uv"
-args = ["--directory", 'C:\Users\pablo\mcp-usc', "run", "mcp-usc", "serve"]
 default_tools_approval_mode = "writes"
 ```
+
+Para usar el mismo servidor desde otros equipos o agentes, sírvelo por HTTP con token: ver
+[Servirlo por HTTP](docs/deployment.md).
 
 Las anotaciones MCP, la previsualización, el token y la aprobación del host son capas
 complementarias; ninguna sustituye una decisión humana sobre los parámetros exactos.
 
 ## Herramientas MCP
 
-La versión 0.11.0 expone 91 herramientas: 49 lecturas puras, 21 previsualizaciones, 20 operaciones con
+La versión 0.11.0 expone 92 herramientas: 50 lecturas puras, 21 previsualizaciones, 20 operaciones con
 efecto y una inspección potencialmente *stateful* que también exige confirmación. El
 [inventario completo](docs/tools.md) y el
 [estudio de capacidades](docs/student-capability-study.md) explican las fronteras de seguridad y

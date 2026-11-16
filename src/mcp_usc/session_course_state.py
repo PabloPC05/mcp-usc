@@ -132,6 +132,9 @@ async def fetch_session_course_states(
 
     snapshots: list[dict[str, Any]] = []
     for course_id in unique_ids:
+        # Deliberately sequential: Moodle locks the PHP session per request, so parallel
+        # AJAX calls with one MoodleSession queue on the server (measured on cv.usc.es:
+        # 6 s in series vs 25 s with 6 concurrent requests).
         raw_state = await gateway.invoke(
             "core_courseformat_get_state", {"courseid": course_id}
         )

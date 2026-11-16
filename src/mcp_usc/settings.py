@@ -28,13 +28,13 @@ class Settings:
     max_upload_bytes: int = 50 * 1024 * 1024
     public_cache_ttl_seconds: float = 300.0
     public_cache_stale_if_error_seconds: float = 3_600.0
-    public_cache_max_entries: int = 128
+    public_cache_max_entries: int = 512
     public_cache_max_total_bytes: int = 64_000_000
     academic_profile: AcademicProfile | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
-        data_dir = Path(user_data_path("mcp-usc", appauthor=False, ensure_exists=True))
+        data_dir = Path(user_data_path("mcp-usc", appauthor=False))
         profile = Path(os.getenv("USC_BROWSER_PROFILE", data_dir / "browser-profile"))
         token = current_moodle_token() or os.getenv("USC_MOODLE_TOKEN") or None
         token_file = os.getenv("USC_MOODLE_TOKEN_FILE")
@@ -64,7 +64,7 @@ class Settings:
             raise ValueError(
                 "USC_PUBLIC_CACHE_STALE_IF_ERROR_SECONDS debe estar entre 0 y 604800"
             )
-        public_cache_max_entries = int(os.getenv("USC_PUBLIC_CACHE_MAX_ENTRIES", "128"))
+        public_cache_max_entries = int(os.getenv("USC_PUBLIC_CACHE_MAX_ENTRIES", "512"))
         if not 1 <= public_cache_max_entries <= 4_096:
             raise ValueError("USC_PUBLIC_CACHE_MAX_ENTRIES debe estar entre 1 y 4096")
         public_cache_max_total_bytes = int(
@@ -76,7 +76,7 @@ class Settings:
         return cls(
             moodle_url=os.getenv("USC_MOODLE_URL", "https://cv.usc.es").rstrip("/"),
             moodle_token=token,
-            browser_channel=os.getenv("USC_BROWSER_CHANNEL", "chromium"),
+            browser_channel=os.getenv("USC_BROWSER_CHANNEL", "auto"),
             browser_profile_dir=profile,
             exam_sources=tuple(
                 validate_usc_url(url) for url in _split_urls(os.getenv("USC_EXAM_SOURCES", ""))

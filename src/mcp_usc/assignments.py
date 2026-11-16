@@ -399,6 +399,11 @@ def _draft_ids(draft: Mapping[str, Any]) -> tuple[int, int, int]:
     )
 
 
+def _read_at_most(path: Path, limit: int) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(limit)
+
+
 async def upload_draft_file(
     invoke: AssignmentInvoke,
     draft: Mapping[str, Any],
@@ -408,19 +413,27 @@ async def upload_draft_file(
     draft_path: str = "/",
     max_bytes: int = DEFAULT_MAX_FILE_BYTES,
     client_request_id: str | None = None,
+    content: bytes | None = None,
 ) -> dict[str, Any]:
-    """Upload one validated local file into the current user's draft area."""
+    """Upload one validated local file into the current user's draft area.
+
+    When ``content`` is given, those already-verified bytes are uploaded instead of
+    re-reading the path, so the caller controls exactly what is sent.
+    """
 
     request_id = _client_request_id(client_request_id)
     item_id, context_id, user_id = _draft_ids(draft)
     path, size = _validated_local_file(file_path, allowed_root, max_bytes)
     moodle_path = _normalise_draft_path(draft_path)
-    try:
-        content = await asyncio.to_thread(path.read_bytes)
-    except OSError as exc:
-        raise ValueError("No se pudo leer el archivo de entrega") from exc
+    if content is None:
+        try:
+            # Never read more than one byte past the limit.
+            content = await asyncio.to_thread(_read_at_most, path, max_bytes + 1)
+        except OSError as exc:
+            raise ValueError("No se pudo leer el archivo de entrega") from exc
     if len(content) > max_bytes:
         raise ValueError(f"El archivo supera el límite de {max_bytes} bytes")
+    size = len(content)
     payload = await invoke(
         "core_files_upload",
         _mutation_params(
@@ -673,12 +686,19 @@ async def replace_submission_files(
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     client_request_id: str | None = None,
+    contents: Sequence[bytes] | None = None,
 ) -> dict[str, Any]:
-    """Replace the complete submitted-file set, never individual files in place."""
+    """Replace the complete submitted-file set, never individual files in place.
+
+    ``contents`` optionally supplies the already-verified bytes of each file (same
+    order as ``files``) so nothing is re-read from disk after confirmation.
+    """
 
     assignment_id = _positive_id(assignment_id, "assignment_id")
     request_id = _client_request_id(client_request_id)
     validated = _validated_file_batch(files, allowed_root, max_file_bytes, max_total_bytes)
+    if contents is not None and len(contents) != len(validated):
+        raise ValueError("contents debe tener un elemento por archivo")
     status = await _editable_status(invoke, assignment_id)
     if not status["editable"]:
         return _not_editable_result(assignment_id, request_id, status, "replace_submission_files")
@@ -713,6 +733,7 @@ async def replace_submission_files(
             allowed_root=allowed_root,
             max_bytes=max_file_bytes,
             client_request_id=_child_request_id(request_id, f"upload-{index}"),
+            content=contents[index] if contents is not None else None,
         )
         if not upload["ok"]:
             return {

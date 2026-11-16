@@ -2,7 +2,7 @@
 
 ## Estado actual: 0.11.x
 
-La serie 0.11 es una beta candidata a estabilización. Expone 91 herramientas e incorpora horarios
+La serie 0.11 es una beta candidata a estabilización. Expone 92 herramientas e incorpora horarios
 lectivos oficiales por HTTP, perfil académico local, diagnóstico de sesión y finalización manual
 confirmada, además de recursos, prompts, manifiesto determinista y CI
 multiplataforma y releases reproducibles. No se

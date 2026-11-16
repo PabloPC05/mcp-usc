@@ -741,6 +741,18 @@ async def preview_reply_forum_post(
     group_matches = (
         raw_group_id in {-1, 0} if resolved_group_id == 0 else raw_group_id == resolved_group_id
     )
+    if (
+        not group_matches
+        and raw_group_id == -1
+        and resolved_group_id > 0
+        and group_id == 0
+        and audience is not None
+    ):
+        # An all-participants discussion returned for the user's only group: whether the user
+        # may reply is decided by Moodle (post capabilities.reply and canreplypost, checked
+        # below). The reply is visible to everyone, so do not describe it as group-only.
+        group_matches = True
+        audience = {"scope": "course", "course_id": course_id}
     if not group_matches:
         return _denied(
             "reply_forum_post",

@@ -4,7 +4,7 @@ import json
 import re
 
 from . import __version__
-from .project_info import PROMPT_NAMES, RESOURCE_URIS
+from .project_info import PROMPT_NAMES, RESOURCE_URIS, TOOL_INVENTORY
 
 _ACADEMIC_YEAR = re.compile(r"^(20\d{2})/(20\d{2})$")
 
@@ -48,9 +48,9 @@ def compatibility_overview() -> dict[str, object]:
     return {
         "version": __version__,
         "mcp": {
-            "transport": "stdio",
+            "transport": ["stdio", "streamable-http"],
             "sdk": "mcp-python 1.29.x",
-            "tools": 86,
+            "tools": TOOL_INVENTORY["total"],
             "resources": len(RESOURCE_URIS),
             "prompts": len(PROMPT_NAMES),
             "host_note": (
@@ -75,7 +75,8 @@ def compatibility_overview() -> dict[str, object]:
         },
         "public_usc": {
             "authentication_required": False,
-            "structured_centres": ["ETSE", "Facultade de Matemáticas"],
+            "exam_dates": "Cualquier grado: planes de estudio y ficha oficial de cada materia.",
+            "curated_centre_calendars": ["ETSE", "Facultade de Matemáticas"],
             "degree_class_timetables": "Drupal público por grado, curso, semestre y semana.",
             "generic_sources": "Páginas o PDF HTTPS de dominios USC configurados explícitamente.",
         },

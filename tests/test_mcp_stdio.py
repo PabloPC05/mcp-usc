@@ -32,6 +32,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "execute_student_action",
         "get_my_completion",
         "get_my_class_timetable",
+        "get_my_subjects_timetable",
         "preview_update_activity_completion_status_manually",
         "update_activity_completion_status_manually",
         "preview_mark_course_self_completed",
@@ -112,7 +113,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "submit_choice_response",
     }
     by_name = {tool.name: tool for tool in response.tools}
-    assert len(response.tools) == 91
+    assert len(response.tools) == 92
     documented_names = {
         name for group_names in CAPABILITY_TOOL_GROUPS.values() for name in group_names
     }

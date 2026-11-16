@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from bs4 import BeautifulSoup
 
+from . import USER_AGENT
 from .exam_catalog import normalise_academic_year, normalise_subject_code
 from .public_http_cache import (
     DEFAULT_PUBLIC_HTTP_CACHE,
@@ -42,7 +43,6 @@ from .study_plans import (
 
 USC_DEGREE_CATALOG_URL = "https://www.usc.gal/gl/estudos/graos"
 
-_USER_AGENT = "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)"
 _ALLOWED_HOSTS = frozenset({"www.usc.gal", "usc.gal"})
 _CATALOG_PATH = re.compile(
     r"^/(?:gl/estudos/graos|es/estudios/grados|en/studies/degrees)/?$"
@@ -386,7 +386,7 @@ class UscDegreeCatalogClient:
 
     async def _get_html(self, url: str) -> PublicHttpResponse:
         _validate_catalog_url(url)
-        headers = {"User-Agent": _USER_AGENT, "Accept": "text/html"}
+        headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
 
         def validate_response(response: PublicHttpResponse) -> None:
             if response.metadata.media_type != "text/html":
@@ -407,6 +407,7 @@ class UscDegreeCatalogClient:
                 headers=headers,
                 validate_redirect=_validate_catalog_url,
                 validate=validate_response,
+                reference=True,
             )
         except PublicHttpError as exc:
             raise DegreeCatalogError(str(exc)) from None
@@ -505,7 +506,10 @@ def _normalise_filters(
         url = raw.strip()
         _degree_area(url)
         if url not in known_urls:
-            raise ValueError("La URL no está anunciada por el catálogo USC actual")
+            raise ValueError(
+                f"La URL no está anunciada por el catálogo USC actual: {url}. "
+                "Usa list_usc_degrees para ver las URL vigentes."
+            )
         if url not in urls:
             urls.append(url)
     selected = tuple(

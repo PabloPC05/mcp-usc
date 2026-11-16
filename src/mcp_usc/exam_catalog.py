@@ -105,11 +105,9 @@ def normalise_academic_year(value: str) -> str:
 
 def extract_academic_year(*values: object) -> str | None:
     for value in values:
-        match = _EMBEDDED_ACADEMIC_YEAR.search(str(value or ""))
-        if not match:
-            continue
-        start = int(match.group(1))
-        end = int((match.group(2) or "20") + match.group(3))
-        if end == start + 1:
-            return f"{start}/{end}"
+        for match in _EMBEDDED_ACADEMIC_YEAR.finditer(str(value or "")):
+            start = int(match.group(1))
+            end = int((match.group(2) or "20") + match.group(3))
+            if end == start + 1:
+                return f"{start}/{end}"
     return None

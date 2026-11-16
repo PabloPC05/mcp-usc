@@ -3,13 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from mcp_usc.exam_calendar import ExamCalendar, ExamCalendarError, ExamCall, ExamSubject
+from mcp_usc.exam_calendar import (
+    ExamCalendar,
+    ExamCalendarError,
+    ExamCall,
+    ExamSubject,
+    SubjectExamSlot,
+    SubjectSheet,
+)
 from mcp_usc.exam_catalog import DEGREE_EXAM_PROFILES
 from mcp_usc.official_exams import (
     _call_signature,
     _merge_calls,
     discover_official_exam_subjects,
     fetch_official_exam_dates,
+    fetch_subject_exam_dates,
 )
 from mcp_usc.service import UscService
 from mcp_usc.settings import Settings
@@ -21,8 +29,7 @@ def _plan(degree_key: str, subjects: tuple[StudyPlanSubject, ...]) -> StudyPlan:
     return StudyPlan(
         academic_year="2025/2026",
         endpoint_url=(
-            "https://www.usc.gal/gl/course/76/study-plan-by-course/"
-            f"{degree.study_plan_catalog_id}"
+            f"https://www.usc.gal/gl/course/76/study-plan-by-course/{degree.study_plan_catalog_id}"
         ),
         source_url=degree.study_plan_url,
         subjects=subjects,
@@ -43,10 +50,19 @@ class FakeCalendarClient:
     def __init__(self, calendar: ExamCalendar) -> None:
         self.calendar = calendar
         self.calls: list[tuple[str, str]] = []
+        self.sheets: dict[str, SubjectSheet | Exception] = {}
+        self.sheet_calls: list[str] = []
 
     async def fetch_calendar(self, url: str, *, academic_year: str) -> ExamCalendar:
         self.calls.append((url, academic_year))
         return self.calendar
+
+    async def fetch_subject_sheet(self, url: str) -> SubjectSheet:
+        self.sheet_calls.append(url)
+        sheet = self.sheets.get(url)
+        if isinstance(sheet, Exception):
+            raise sheet
+        return sheet or SubjectSheet(url, "Materia", None, None, ())
 
 
 class PartialStudyPlanClient(FakeStudyPlanClient):
@@ -141,8 +157,12 @@ async def test_variant_code_round_trips_from_listing_to_official_query() -> None
 
 
 async def test_same_code_in_both_plans_is_unified_only_when_calls_are_equal() -> None:
-    subject = StudyPlanSubject("G4012222", "Algoritmos e Estruturas de Datos", "https://www.usc.gal/gl/estudos/a")
-    second_subject = StudyPlanSubject(subject.code, subject.name, "https://www.usc.gal/gl/estudos/b")
+    subject = StudyPlanSubject(
+        "G4012222", "Algoritmos e Estruturas de Datos", "https://www.usc.gal/gl/estudos/a"
+    )
+    second_subject = StudyPlanSubject(
+        subject.code, subject.name, "https://www.usc.gal/gl/estudos/b"
+    )
     call = ExamCall("1º semestre", "1ª Oportunidade", "20.01.2026 - 10:00", (), ())
     plans, calendars = _clients(
         current_subjects=(subject,),
@@ -165,8 +185,12 @@ async def test_same_code_in_both_plans_is_unified_only_when_calls_are_equal() ->
 
 
 async def test_same_code_with_different_plan_dates_is_ambiguous() -> None:
-    subject = StudyPlanSubject("G4012222", "Algoritmos e Estruturas de Datos", "https://www.usc.gal/gl/estudos/a")
-    second_subject = StudyPlanSubject(subject.code, subject.name, "https://www.usc.gal/gl/estudos/b")
+    subject = StudyPlanSubject(
+        "G4012222", "Algoritmos e Estruturas de Datos", "https://www.usc.gal/gl/estudos/a"
+    )
+    second_subject = StudyPlanSubject(
+        subject.code, subject.name, "https://www.usc.gal/gl/estudos/b"
+    )
     first = ExamCall("1º semestre", "1ª Oportunidade", "20.01.2026 - 10:00", (), ())
     other = ExamCall("1º semestre", "1ª Oportunidade", "21.01.2026 - 10:00", (), ())
     plans, calendars = _clients(
@@ -224,9 +248,7 @@ def test_equivalent_calls_merge_room_evidence_without_changing_identity() -> Non
 
 
 async def test_unknown_code_is_not_found_after_dynamic_discovery() -> None:
-    plans, calendars = _clients(
-        current_subjects=(), second_subjects=(), calendar_subjects=()
-    )
+    plans, calendars = _clients(current_subjects=(), second_subjects=(), calendar_subjects=())
 
     result = await fetch_official_exam_dates(
         ["G9999999"],
@@ -295,7 +317,8 @@ async def test_dynamic_catalog_lists_subjects_from_both_official_plans() -> None
     )
 
     result = await discover_official_exam_subjects(
-        "2025/2026", client=plans  # type: ignore[arg-type]
+        "2025/2026",
+        client=plans,  # type: ignore[arg-type]
     )
 
     assert result["complete"] is True
@@ -373,26 +396,23 @@ async def test_my_schedule_uses_hidden_courses_and_filters_exact_year(
     async def fake_fetch(
         codes: list[str],
         year: str,
-        degree_keys: list[str] | None,
         *,
+        degree_urls: list[str],
+        widen_to_catalog: bool,
         timeout: float,
         cache: object,
     ) -> dict[str, Any]:
         captured.update(
             codes=codes,
             year=year,
-            degree_keys=degree_keys,
+            degree_urls=degree_urls,
+            widen_to_catalog=widen_to_catalog,
             timeout=timeout,
             cache=cache,
         )
-        return {
-            "academic_year": year,
-            "subjects": [],
-            "sources_checked": [],
-            "fetched_at": "now",
-        }
+        return {"academic_year": year, "subjects": [], "fetched_at": "now"}
 
-    monkeypatch.setattr("mcp_usc.service.fetch_official_exam_dates", fake_fetch)
+    monkeypatch.setattr("mcp_usc.service.fetch_subject_exam_dates", fake_fetch)
     service = UscService(
         Settings(
             moodle_url="https://cv.usc.es",
@@ -408,6 +428,271 @@ async def test_my_schedule_uses_hidden_courses_and_filters_exact_year(
 
     assert captured["codes"] == ["G1012106"]
     assert captured["year"] == "2025/2026"
-    assert captured["degree_keys"] is None
+    # No curated degree is assumed: without a profile the whole catalogue is searched.
+    assert captured["degree_urls"] == []
+    assert captured["widen_to_catalog"] is True
     assert captured["cache"] is service._public_http_cache
     assert result["matched_moodle_courses"][0]["dashboard_hidden"] is True
+
+
+_SHEET_URL = (
+    "https://www.usc.gal/gl/estudos/graos/enxenaria-arquitectura/"
+    "dobre-grao-enxenaria-informatica-matematicas-0/20252026/"
+    "administracion-sistemas-redes-20874-19957-3-98056"
+)
+
+
+async def test_subject_sheet_supplies_dates_missing_from_the_centre_calendar() -> None:
+    subject = StudyPlanSubject("G4012322", "Administración de Sistemas e Redes", _SHEET_URL)
+    plans, calendars = _clients(
+        current_subjects=(subject,), second_subjects=(), calendar_subjects=()
+    )
+    calendars.sheets[_SHEET_URL] = SubjectSheet(
+        _SHEET_URL,
+        subject.name,
+        "2025/2026",
+        "1º semestre",
+        (
+            SubjectExamSlot("08.01.2026 10:00-14:00", ("Aula A1",), ("Grupo /CLE_01",)),
+            SubjectExamSlot("18.06.2026 10:00-14:00", ("Aula A3",), ("Grupo /CLE_01",)),
+        ),
+    )
+
+    result = await fetch_official_exam_dates(
+        ["G4012322"],
+        "2025/2026",
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=calendars,  # type: ignore[arg-type]
+    )
+
+    item = result["subjects"][0]
+    assert item["status"] == "matched"
+    assert [call["starts_at"] for call in item["calls"]] == [
+        "2026-01-08T10:00:00+01:00",
+        "2026-06-18T10:00:00+02:00",
+    ]
+    assert item["calls"][0]["ends_at"] == "2026-01-08T14:00:00+01:00"
+    assert item["calls"][0]["rooms"] == ["Aula A1"]
+    evidence = item["candidates"][0]["evidence"]
+    assert evidence[0]["source"] == "subject_sheet"
+    assert evidence[0]["source_url"] == _SHEET_URL
+    assert calendars.sheet_calls == [_SHEET_URL]
+
+
+async def test_unreadable_subject_sheet_keeps_the_subject_unpublished() -> None:
+    subject = StudyPlanSubject("G4012322", "Administración de Sistemas e Redes", _SHEET_URL)
+    plans, calendars = _clients(
+        current_subjects=(subject,), second_subjects=(), calendar_subjects=()
+    )
+    calendars.sheets[_SHEET_URL] = ExamCalendarError("schema changed")
+
+    result = await fetch_official_exam_dates(
+        ["G4012322"],
+        "2025/2026",
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=calendars,  # type: ignore[arg-type]
+    )
+
+    item = result["subjects"][0]
+    assert item["status"] == "not_published_or_not_found"
+    assert item["calls"] == []
+    assert _SHEET_URL in item["candidates"][0]["source_errors"]
+
+
+# --- Any degree: study plans + subject sheets, no curated crosswalk ---------------------
+
+_BIO = "https://www.usc.gal/gl/estudos/graos/ciencias/grao-bioloxia"
+_MED = "https://www.usc.gal/gl/estudos/graos/ciencias-saude/grao-medicina"
+
+
+def _catalog():
+    from mcp_usc.degree_catalog import DegreeCatalog, DegreeCatalogEntry
+
+    return DegreeCatalog(
+        source_url="https://www.usc.gal/gl/estudos/graos",
+        degrees=(
+            DegreeCatalogEntry("Grao en Bioloxía", _BIO, "ciencias", "Santiago"),
+            DegreeCatalogEntry("Grao en Medicina", _MED, "ciencias-saude", "Santiago"),
+        ),
+    )
+
+
+class _CatalogClient:
+    async def fetch_catalog(self, url: str):
+        del url
+        return _catalog()
+
+
+class _PlansByDegree:
+    def __init__(self, subjects: dict[str, tuple[StudyPlanSubject, ...]]) -> None:
+        self.subjects = subjects
+        self.calls: list[str] = []
+
+    async def fetch_study_plan(self, url: str, *, academic_year: str) -> StudyPlan:
+        self.calls.append(url)
+        return StudyPlan(academic_year, f"{url}/plan", url, self.subjects.get(url, ()))
+
+
+def _sheet(url: str, *dates: str) -> SubjectSheet:
+    slots = tuple(
+        SubjectExamSlot(f"{date} 10:00-13:00", ("Aula 1",), ("Grupo /CLE_01",)) for date in dates
+    )
+    return SubjectSheet(url, "Materia", "2026/2027", None, slots)
+
+
+async def test_any_degree_gets_exam_dates_from_its_subject_sheet() -> None:
+    sheet_url = f"{_BIO}/20262027/xenetica-1-2-3-4"
+    plans = _PlansByDegree(
+        {_BIO: (StudyPlanSubject("G2011301", "Xenética", sheet_url, course_number=3),)}
+    )
+    sheets = FakeCalendarClient(ExamCalendar("2026/2027", "x", ()))
+    sheets.sheets[sheet_url] = _sheet(sheet_url, "20.01.2027", "25.06.2027")
+
+    result = await fetch_subject_exam_dates(
+        ["G2011301"],
+        "2026/2027",
+        catalog_client=_CatalogClient(),  # type: ignore[arg-type]
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=sheets,  # type: ignore[arg-type]
+    )
+
+    [subject] = result["subjects"]
+    assert subject["status"] == "matched"
+    assert [call["starts_at"][:10] for call in subject["calls"]] == ["2027-01-20", "2027-06-25"]
+    assert subject["candidates"][0]["degree_name"] == "Grao en Bioloxía"
+    assert subject["candidates"][0]["course_number"] == 3
+    assert set(plans.calls) == {_BIO, _MED}  # the whole catalogue, no degree assumed
+
+
+async def test_student_degrees_are_searched_first_and_win_over_shared_plans() -> None:
+    bio_sheet = f"{_BIO}/20262027/quimica-1-2-3-4"
+    med_sheet = f"{_MED}/20262027/quimica-5-6-7-8"
+    plans = _PlansByDegree(
+        {
+            _BIO: (StudyPlanSubject("G2011102", "Química", bio_sheet),),
+            _MED: (StudyPlanSubject("G2011102", "Química", med_sheet),),
+        }
+    )
+    sheets = FakeCalendarClient(ExamCalendar("2026/2027", "x", ()))
+    sheets.sheets[bio_sheet] = _sheet(bio_sheet, "15.01.2027")
+    sheets.sheets[med_sheet] = _sheet(med_sheet, "22.01.2027")
+
+    result = await fetch_subject_exam_dates(
+        ["G2011102"],
+        "2026/2027",
+        degree_urls=[_MED],
+        catalog_client=_CatalogClient(),  # type: ignore[arg-type]
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=sheets,  # type: ignore[arg-type]
+    )
+
+    [subject] = result["subjects"]
+    assert subject["status"] == "matched"
+    assert subject["calls"][0]["starts_at"][:10] == "2027-01-22"
+    assert plans.calls == [_MED]  # found in the student's degree: no catalogue scan
+    assert result["degree_scope"]["widened_to_catalog"] is False
+
+
+async def test_codes_missing_from_the_student_degree_are_found_in_the_catalogue() -> None:
+    sheet_url = f"{_BIO}/20262027/botanica-1-2-3-4"
+    plans = _PlansByDegree({_BIO: (StudyPlanSubject("G2011205", "Botánica", sheet_url),)})
+    sheets = FakeCalendarClient(ExamCalendar("2026/2027", "x", ()))
+    sheets.sheets[sheet_url] = _sheet(sheet_url, "30.05.2027")
+
+    result = await fetch_subject_exam_dates(
+        ["G2011205", "G9999999"],
+        "2026/2027",
+        degree_urls=[_MED, "https://www.usc.gal/gl/estudos/graos/ciencias/grao-antigo"],
+        catalog_client=_CatalogClient(),  # type: ignore[arg-type]
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=sheets,  # type: ignore[arg-type]
+    )
+
+    statuses = {item["subject_code"]: item["status"] for item in result["subjects"]}
+    assert statuses == {"G2011205": "matched", "G9999999": "not_found_in_study_plans"}
+    assert result["degree_scope"]["widened_to_catalog"] is True
+    assert result["degree_scope"]["ignored_degree_urls"] == [
+        "https://www.usc.gal/gl/estudos/graos/ciencias/grao-antigo"
+    ]
+
+
+async def test_a_plan_without_published_dates_does_not_make_the_subject_ambiguous() -> None:
+    bio_sheet = f"{_BIO}/20262027/fisica-1-2-3-4"
+    med_sheet = f"{_MED}/20262027/fisica-5-6-7-8"
+    plans = _PlansByDegree(
+        {
+            _BIO: (StudyPlanSubject("G2011103", "Física", bio_sheet),),
+            _MED: (StudyPlanSubject("G2011103", "Física", med_sheet),),
+        }
+    )
+    sheets = FakeCalendarClient(ExamCalendar("2026/2027", "x", ()))
+    sheets.sheets[bio_sheet] = _sheet(bio_sheet, "18.01.2027")
+
+    result = await fetch_subject_exam_dates(
+        ["G2011103"],
+        "2026/2027",
+        catalog_client=_CatalogClient(),  # type: ignore[arg-type]
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=sheets,  # type: ignore[arg-type]
+    )
+
+    [subject] = result["subjects"]
+    assert subject["status"] == "matched"
+    assert {item["status"] for item in subject["candidates"]} == {
+        "matched",
+        "not_published_or_not_found",
+    }
+
+
+async def test_previous_plans_missing_from_the_catalogue_are_found_next_to_it() -> None:
+    # Live case (2026/27): the catalogue lists "grao-medicina-2a-edicion" only, while 3rd-6th
+    # year students still take "grao-medicina" (G2051...) subjects.
+    from mcp_usc.degree_catalog import DegreeCatalog, DegreeCatalogEntry
+    from mcp_usc.study_plans import StudyPlanHttpError
+
+    new_plan = f"{_MED}-2a-edicion"
+    sheet_url = f"{_MED}/20262027/anatomia-1-2-3-4"
+
+    class Catalog:
+        async def fetch_catalog(self, url: str) -> DegreeCatalog:
+            del url
+            return DegreeCatalog(
+                "https://www.usc.gal/gl/estudos/graos",
+                (
+                    DegreeCatalogEntry(
+                        "Grao en Medicina (2ª edición)", new_plan, "ciencias-saude", None
+                    ),
+                ),
+            )
+
+    class Plans(_PlansByDegree):
+        async def fetch_study_plan(self, url: str, *, academic_year: str) -> StudyPlan:
+            if url not in self.subjects:
+                self.calls.append(url)
+                raise StudyPlanHttpError("La fuente USC respondió con HTTP 404")
+            return await super().fetch_study_plan(url, academic_year=academic_year)
+
+    plans = Plans(
+        {
+            new_plan: (StudyPlanSubject("G2052101", "Anatomía I", f"{new_plan}/x-1-1-1-1"),),
+            _MED: (
+                StudyPlanSubject("G2051321", "Anatomía Patolóxica", sheet_url, course_number=3),
+            ),
+        }
+    )
+    sheets = FakeCalendarClient(ExamCalendar("2026/2027", "x", ()))
+    sheets.sheets[sheet_url] = _sheet(sheet_url, "12.01.2027")
+
+    result = await fetch_subject_exam_dates(
+        ["G2051321"],
+        "2026/2027",
+        catalog_client=Catalog(),  # type: ignore[arg-type]
+        study_plan_client=plans,  # type: ignore[arg-type]
+        calendar_client=sheets,  # type: ignore[arg-type]
+    )
+
+    [subject] = result["subjects"]
+    assert subject["status"] == "matched"
+    assert subject["candidates"][0]["degree_url"] == _MED
+    assert subject["candidates"][0]["degree_name"].endswith("(plan anterior)")
+    assert result["complete"] is True  # sibling URLs that do not exist are not failures

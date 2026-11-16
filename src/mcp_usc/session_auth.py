@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from . import USER_AGENT
 from .credentials import CredentialStore
 from .security import html_to_text, validate_usc_url
 from .settings import Settings
@@ -156,7 +157,7 @@ async def import_session_cookie(
             timeout=settings.request_timeout_seconds,
             follow_redirects=False,
             cookies={"MoodleSession": cookie},
-            headers={"Accept": "text/html", "User-Agent": "mcp-usc/0.4"},
+            headers={"Accept": "text/html", "User-Agent": USER_AGENT},
         ) as client:
             response = await client.get(validation_url)
     except httpx.HTTPError:

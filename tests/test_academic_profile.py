@@ -71,8 +71,13 @@ def test_profile_file_is_local_and_environment_values_override(tmp_path) -> None
             "USC_ACADEMIC_DEGREE_URL": "https://evil.example/degree",
             "USC_ACADEMIC_COURSE_NUMBER": "2",
         },
-        {"USC_ACADEMIC_DEGREE_URL": DEGREE_URL},
+        {"USC_ACADEMIC_COURSE_NUMBER": "2"},
         {"USC_ACADEMIC_DEGREE_URL": DEGREE_URL, "USC_ACADEMIC_COURSE_NUMBER": "13"},
+        {
+            "USC_ACADEMIC_DEGREE_URL": DEGREE_URL,
+            "USC_ACADEMIC_EXTRA_DEGREE_URLS": "https://evil.example/degree",
+        },
+        {"USC_ACADEMIC_DEGREE_URL": DEGREE_URL, "USC_ACADEMIC_SUBJECT_CODES": "X123"},
         {
             "USC_ACADEMIC_DEGREE_URL": DEGREE_URL,
             "USC_ACADEMIC_COURSE_NUMBER": "2",
@@ -189,3 +194,59 @@ async def test_high_level_service_requires_profile_before_constructing_network_c
     service = UscService(settings)
     with pytest.raises(AcademicProfileError, match="perfil académico"):
         await service.get_my_class_timetable()
+
+
+@pytest.mark.parametrize("value", [2.9, 2.0, True, "٢", "2.5", "²", "２", b"2"])
+def test_course_number_rejects_non_integers_and_non_ascii_digits(value: object) -> None:
+    with pytest.raises(AcademicProfileError):
+        AcademicProfile(degree_url=DEGREE_URL, course_number=value)  # type: ignore[arg-type]
+
+
+def test_course_number_accepts_int_and_ascii_digit_text() -> None:
+    assert AcademicProfile(degree_url=DEGREE_URL, course_number=2).course_number == 2
+    assert AcademicProfile(degree_url=DEGREE_URL, course_number=" 3 ").course_number == 3  # type: ignore[arg-type]
+
+
+def test_resolve_infers_year_and_semester_from_europe_madrid_date(monkeypatch) -> None:
+    from datetime import UTC, datetime
+
+    # 2025-08-31 23:30 UTC is already 2025-09-01 in Madrid (UTC+2).
+    monkeypatch.setattr(
+        "mcp_usc.academic_profile._utc_now",
+        lambda: datetime(2025, 8, 31, 23, 30, tzinfo=UTC),
+    )
+    profile = AcademicProfile(degree_url=DEGREE_URL, course_number=2)
+
+    assert profile.resolve() == ("2025/2026", 1, None)
+
+
+def test_profile_for_any_student_needs_only_the_degree() -> None:
+    # Students with subjects from several courses or degrees (SICUE, double degrees,
+    # electives) describe their degrees and, optionally, their subject codes.
+    extra = "https://www.usc.gal/gl/estudos/graos/ciencias/grao-matematicas-0"
+    profile = load_academic_profile(
+        {
+            "USC_ACADEMIC_DEGREE_URL": DEGREE_URL,
+            "USC_ACADEMIC_EXTRA_DEGREE_URLS": f"{extra};{DEGREE_URL}",
+            "USC_ACADEMIC_SUBJECT_CODES": "g4012328; G1011422,G4012328",
+        }
+    )
+
+    assert profile is not None
+    assert profile.course_number is None
+    assert profile.degree_urls == (DEGREE_URL, extra)
+    assert profile.subject_codes == ("G4012328", "G1011422")
+    assert profile.public_dict()["subject_codes"] == ["G4012328", "G1011422"]
+
+
+def test_profile_file_accepts_short_keys_for_the_new_fields(tmp_path) -> None:
+    path = tmp_path / "perfil.json"
+    path.write_text(
+        json.dumps({"degree": DEGREE_URL, "subjects": ["G4012328"], "extra_degrees": []}),
+        encoding="utf-8",
+    )
+
+    profile = load_academic_profile({"USC_ACADEMIC_PROFILE_FILE": str(path)})
+
+    assert profile is not None
+    assert profile.subject_codes == ("G4012328",)

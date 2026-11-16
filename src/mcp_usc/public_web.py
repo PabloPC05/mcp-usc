@@ -8,14 +8,15 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from . import USER_AGENT
 from .domain import MADRID
-from .security import html_to_text, validate_usc_url
+from .security import UnsafeUrlError, html_to_text, validate_usc_url
 
 _EXAM_TERMS = ("exame", "examen", "proba", "prueba", "avaliación", "evaluación")
 _STOPWORDS = frozenset({"a", "de", "do", "da", "e", "el", "la", "o", "y"})
@@ -39,17 +40,27 @@ class FetchedDocument:
 class PublicUscClient:
     """Small, user-triggered USC fetcher. It deliberately is not a general web crawler."""
 
-    def __init__(self, timeout: float = 30.0, max_bytes: int = 15_000_000) -> None:
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        max_bytes: int = 15_000_000,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.timeout = timeout
         self.max_bytes = max_bytes
+        self.transport = transport
 
     async def fetch(self, url: str) -> FetchedDocument:
         current = validate_usc_url(url)
+        # Redirects must stay on the host that was requested.
+        expected_host = _host(current)
         headers = {
-            "User-Agent": "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)",
+            "User-Agent": USER_AGENT,
             "Accept": "text/html,application/pdf;q=0.9,*/*;q=0.2",
         }
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout, follow_redirects=False, transport=self.transport
+        ) as client:
             for _ in range(6):
                 async with client.stream("GET", current, headers=headers) as response:
                     if response.is_redirect:
@@ -61,6 +72,10 @@ class PublicUscClient:
                                 response=response,
                             )
                         current = validate_usc_url(urljoin(current, location))
+                        if _host(current) != expected_host:
+                            raise UnsafeUrlError(
+                                "Redirección a otro host no permitida para fuentes de exámenes"
+                            )
                         continue
                     response.raise_for_status()
                     chunks: list[bytes] = []
@@ -82,14 +97,20 @@ class PublicUscClient:
         raise ValueError("Demasiadas redirecciones al consultar la fuente USC")
 
 
+def _host(url: str) -> str:
+    return (urlparse(url).hostname or "").lower().rstrip(".")
+
+
 def _html_lines(content: bytes) -> tuple[list[str], list[str]]:
     soup = BeautifulSoup(content.decode("utf-8", errors="replace"), "html.parser")
     for tag in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
         tag.decompose()
     lines: list[str] = []
+    seen: set[str] = set()
     for element in soup.select("h1, h2, h3, h4, p, li, tr"):
         text = html_to_text(element.get_text(" ", strip=True), limit=2_000)
-        if text and text not in lines:
+        if text and text not in seen:
+            seen.add(text)
             lines.append(text)
     links: list[str] = []
     for link in soup.select("a[href]"):
@@ -157,6 +178,7 @@ async def search_exam_sources(
     max_documents: int = 8,
     max_snippets_per_document: int = 8,
     timeout: float = 30.0,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, object]:
     if not source_urls:
         return {
@@ -169,7 +191,7 @@ async def search_exam_sources(
     if max_documents < 1 or max_documents > 20:
         raise ValueError("max_documents debe estar entre 1 y 20")
 
-    client = PublicUscClient(timeout=timeout)
+    client = PublicUscClient(timeout=timeout, transport=transport)
     queue = [validate_usc_url(url) for url in source_urls]
     visited: set[str] = set()
     results: list[dict[str, object]] = []
@@ -229,6 +251,9 @@ async def search_exam_sources(
                     try:
                         candidate = validate_usc_url(urljoin(document.url, link))
                     except ValueError:
+                        continue
+                    # Only follow links on the host of the page being crawled.
+                    if _host(candidate) != _host(document.url):
                         continue
                     if candidate not in visited and candidate not in queue:
                         queue.append(candidate)

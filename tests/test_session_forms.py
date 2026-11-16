@@ -298,6 +298,66 @@ async def test_submit_assignment_posts_refetched_confirmation_form() -> None:
     assert http.post_calls[0][1]["submissionstatement"] == "1"
 
 
+def _submit_assignment_form_without_statement() -> str:
+    return """
+    <form method="post" action="/mod/assign/view.php">
+      <input type="hidden" name="id" value="17">
+      <input type="hidden" name="action" value="confirmsubmit">
+      <input type="hidden" name="sesskey" value="abc123">
+    </form>
+    """
+
+
+async def test_submit_assignment_without_statement_field_does_not_send_it() -> None:
+    http = FakeHttp(
+        [
+            FormResponse(
+                f"{BASE}/mod/assign/view.php?id=17&action=submit",
+                _submit_assignment_form_without_statement(),
+            )
+        ]
+    )
+
+    result = await http.client().submit_assignment(
+        17, {"submissionstatement": True}, confirmed=True
+    )
+
+    assert result["request_sent"] is True
+    assert "submissionstatement" not in http.post_calls[0][1]
+    assert http.post_calls[0][1]["action"] == "confirmsubmit"
+
+
+async def test_submit_assignment_without_statement_field_and_unaccepted_still_posts() -> None:
+    http = FakeHttp(
+        [
+            FormResponse(
+                f"{BASE}/mod/assign/view.php?id=17&action=submit",
+                _submit_assignment_form_without_statement(),
+            )
+        ]
+    )
+
+    result = await http.client().submit_assignment(
+        17, {"submissionstatement": False}, confirmed=True
+    )
+
+    assert result["request_sent"] is True
+    assert "submissionstatement" not in http.post_calls[0][1]
+
+
+async def test_submit_assignment_with_statement_field_fails_closed_when_unaccepted() -> None:
+    http = FakeHttp(
+        [FormResponse(f"{BASE}/mod/assign/view.php?id=17&action=submit", _submit_assignment_form())]
+    )
+
+    result = await http.client().submit_assignment(
+        17, {"submissionstatement": False}, confirmed=True
+    )
+
+    assert result["diagnostic"]["code"] == "confirmation_fields_required"
+    assert http.post_calls == []
+
+
 async def test_delete_assignment_uses_only_server_discovered_bound_action() -> None:
     html = """
     <a href="/mod/assign/view.php?id=17&amp;action=removesubmission&amp;sesskey=abc123">

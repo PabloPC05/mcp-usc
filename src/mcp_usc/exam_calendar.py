@@ -11,7 +11,9 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString, TemplateString
 
+from . import USER_AGENT
 from .exam_catalog import normalise_subject_code
 from .public_http_cache import (
     DEFAULT_PUBLIC_HTTP_CACHE,
@@ -23,7 +25,6 @@ from .public_http_cache import (
 )
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)"
 _ACADEMIC_YEAR = re.compile(r"^20(?P<start>\d{2})/20(?P<end>\d{2})$")
 _PLAN_CLASS = re.compile(r"^is-type-(?P<plan_id>\d+)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -437,6 +438,13 @@ def _subject_semester(soup: BeautifulSoup) -> str | None:
     return None
 
 
+def _rendered_text(tag: Tag) -> str:
+    """Text including <template> content: usc.gal renders the exam tab inside a Vue
+    template, and bs4 excludes TemplateString from get_text() by default."""
+
+    return tag.get_text(" ", strip=True, types=(NavigableString, TemplateString))
+
+
 def _subject_exam_slots(soup: BeautifulSoup) -> tuple[SubjectExamSlot, ...]:
     collected: OrderedDict[str, dict[str, list[str]]] = OrderedDict()
     exam_captions = {"exame", "exames", "examen", "examenes", "exam", "exams"}
@@ -444,11 +452,11 @@ def _subject_exam_slots(soup: BeautifulSoup) -> tuple[SubjectExamSlot, ...]:
         caption = table.find("caption")
         if not isinstance(caption, Tag):
             continue
-        if _normalise_label(caption.get_text(" ", strip=True)) not in exam_captions:
+        if _normalise_label(_rendered_text(caption)) not in exam_captions:
             continue
         for row in table.select("tbody > tr"):
             cells = [
-                _clean_text(cell.get_text(" ", strip=True))
+                _clean_text(_rendered_text(cell))
                 for cell in row.find_all(["td", "th"], recursive=False)
             ]
             if len(cells) < 3 or not cells[0]:
@@ -556,7 +564,7 @@ class UscExamCalendarClient:
         elif _validated_calendar_url(url) != kind:
             raise UnsafeUrlError("Tipo de URL de calendario inesperado")
         headers = {
-            "User-Agent": _USER_AGENT,
+            "User-Agent": USER_AGENT,
             "Accept": "application/json" if kind == "ajax" else "text/html",
         }
         if kind == "ajax":

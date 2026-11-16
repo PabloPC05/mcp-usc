@@ -18,6 +18,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from . import USER_AGENT
 from .exam_catalog import normalise_subject_code
 from .public_http_cache import (
     DEFAULT_PUBLIC_HTTP_CACHE,
@@ -30,7 +31,6 @@ from .public_http_cache import (
 )
 from .security import UnsafeUrlError, validate_usc_url
 
-_USER_AGENT = "mcp-usc/0.7 (+https://github.com/PabloPC05/mcp-usc)"
 _ACADEMIC_YEAR = re.compile(r"^20(?P<start>\d{2})/20(?P<end>\d{2})$")
 _AJAX_PATH = re.compile(r"^/(?:gl|es|en)/course/\d+/study-plan-by-course/\d+/?$")
 _MODULE_PATH = re.compile(r"^/(?:gl|es|en)/course/\d+/study-plan-by-module/\d+/?$")
@@ -99,6 +99,11 @@ class StudyPlanSubject:
     name: str
     sheet_url: str
     alternate_sheet_urls: tuple[str, ...] = ()
+    # Where the plan places the subject: its course (1..12) from the enclosing
+    # ``school-year-N`` block, and the semester printed in its specs (1, 2, or None for
+    # year-long or unstated). Both stay None rather than being guessed.
+    course_number: int | None = None
+    semester: int | None = None
 
     @property
     def url(self) -> str:
@@ -326,6 +331,42 @@ def _subject_url(value: str, source_url: str) -> str:
     return _validated_url(candidate, "subject")
 
 
+# Accordion headers read "1ro curso", "2do curso", "1º curso", "Curso 3"... depending on
+# the page language; only an explicit number next to "curso"/"course" counts.
+_COURSE_HEADER = re.compile(
+    r"^(?:(\d{1,2})\s*(?:º|ª|o|ro|do|er|to|vo|no|th|st|nd|rd)?\s*(?:curso|course|year)"
+    r"|(?:curso|course|year)\s*(\d{1,2}))$",
+    re.IGNORECASE,
+)
+_SEMESTER_SPEC = {
+    1: ("primeiro semestre", "primer semestre", "first semester", "1º semestre", "1o semestre"),
+    2: ("segundo semestre", "second semester", "2º semestre", "2o semestre"),
+}
+
+
+def _plan_course_number(title: Tag) -> int | None:
+    item = title.find_parent("usc-accordion-item")
+    if not isinstance(item, Tag):
+        return None
+    header = item.find(True)
+    if not isinstance(header, Tag) or header.find("h3", class_="at-title") is not None:
+        return None
+    match = _COURSE_HEADER.fullmatch(_clean_text(header.get_text(" ", strip=True)))
+    if match is None:
+        return None
+    number = int(match.group(1) or match.group(2))
+    return number if 1 <= number <= 12 else None
+
+
+def _plan_semester(spec_cells: list[Tag]) -> int | None:
+    for cell in spec_cells[1:]:
+        text = _clean_text(cell.get_text(" ", strip=True)).casefold()
+        for semester, labels in _SEMESTER_SPEC.items():
+            if text in labels:
+                return semester
+    return None
+
+
 def parse_study_plan_html(
     plan_html: str, source_url: str, *, academic_year: str | None = None
 ) -> tuple[StudyPlanSubject, ...]:
@@ -394,6 +435,8 @@ def parse_study_plan_html(
                     name=existing.name,
                     sheet_url=existing.sheet_url,
                     alternate_sheet_urls=(*existing.alternate_sheet_urls, sheet_url),
+                    course_number=existing.course_number,
+                    semester=existing.semester,
                 )
                 seen_urls[sheet_url] = code
             continue
@@ -402,7 +445,15 @@ def parse_study_plan_html(
             raise StudyPlanParseError("Una ficha aparece asociada a varios códigos")
         seen[code] = len(subjects)
         seen_urls[sheet_url] = code
-        subjects.append(StudyPlanSubject(code=code, name=name, sheet_url=sheet_url))
+        subjects.append(
+            StudyPlanSubject(
+                code=code,
+                name=name,
+                sheet_url=sheet_url,
+                course_number=_plan_course_number(title),
+                semester=_plan_semester(code_cells),
+            )
+        )
     return tuple(subjects)
 
 
@@ -552,7 +603,7 @@ class UscStudyPlanClient:
     ) -> PublicHttpResponse:
         _validated_url(url, kind)
         headers = {
-            "User-Agent": _USER_AGENT,
+            "User-Agent": USER_AGENT,
             "Accept": "application/json" if kind == "ajax" else "text/html",
         }
         if kind == "ajax":
@@ -570,6 +621,9 @@ class UscStudyPlanClient:
                 headers=headers,
                 validate_redirect=lambda candidate: _validated_url(candidate, kind),
                 validate=validate_response,
+                # Plans change at most once per academic year; subject sheets carry the
+                # exam dates and keep the configured (short) lifetime.
+                reference=kind != "subject",
             )
         except PublicHttpStatusError as exc:
             raise StudyPlanHttpError(exc.status_code) from None

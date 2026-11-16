@@ -51,7 +51,9 @@ INSTRUCTIONS = (
     "Al informar de horarios conserva timetable_url, centro y program_id en cada sesión; puedes "
     "agregar centros del mismo plan, pero nunca mezcles planes homónimos ni ocultes la procedencia."
     " get_my_class_timetable solo usa el perfil académico local explícito y también es una "
-    "lectura pública; nunca modifica la matrícula ni el Campus."
+    "lectura pública; nunca modifica la matrícula ni el Campus. Para el horario o los exámenes "
+    "del propio alumno, de cualquier grado o con asignaturas de varios cursos, usa "
+    "get_my_subjects_timetable y get_my_official_exam_schedule."
 )
 
 
@@ -943,6 +945,20 @@ async def get_my_class_timetable(
 
 
 @mcp.tool(annotations=READ_ONLY)
+async def get_my_subjects_timetable(
+    academic_year: str | None = None,
+    semester: int | None = None,
+    date_in_week: str | None = None,
+    subject_codes: list[str] | None = None,
+    group_codes: list[str] | None = None,
+) -> dict:
+    """Horario semanal solo de mis asignaturas, de cualquier curso o grado USC."""
+    return await _service().get_my_subjects_timetable(
+        academic_year, semester, date_in_week, subject_codes, group_codes
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
 async def locate_usc_subject_codes(
     subject_codes: list[str],
     academic_year: str,
@@ -976,17 +992,24 @@ async def get_official_exam_dates(
     subject_codes: list[str],
     academic_year: str,
     degree_keys: list[str] | None = None,
+    degree_urls: list[str] | None = None,
 ) -> dict:
-    """Obtiene convocatorias USC por código y curso exactos, distinguiendo planes homónimos."""
-    return await _service().get_official_exam_dates(subject_codes, academic_year, degree_keys)
+    """Fechas oficiales de examen de materias de cualquier grado USC por código G y curso."""
+    return await _service().get_official_exam_dates(
+        subject_codes, academic_year, degree_keys, degree_urls
+    )
 
 
 @mcp.tool(annotations=READ_ONLY)
 async def get_my_official_exam_schedule(
-    academic_year: str, degree_keys: list[str] | None = None
+    academic_year: str,
+    degree_keys: list[str] | None = None,
+    degree_urls: list[str] | None = None,
 ) -> dict:
-    """Cruza los códigos de mis cursos Moodle con calendarios oficiales USC del año indicado."""
-    return await _service().get_my_official_exam_schedule(academic_year, degree_keys)
+    """Fechas oficiales de examen de las materias de mis cursos Moodle, de cualquier grado."""
+    return await _service().get_my_official_exam_schedule(
+        academic_year, degree_keys, degree_urls
+    )
 
 
 @mcp.tool(annotations=READ_ONLY)

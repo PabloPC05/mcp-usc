@@ -520,6 +520,90 @@ async def test_forum_reply_filters_the_exact_allowed_group() -> None:
     assert discussion_call[1]["groupid"] == 3
 
 
+def _group_forum_reply_invoke(discussion_group: int, can_reply: bool = True) -> FakeInvoke:
+    return FakeInvoke(
+        {
+            "mod_forum_get_forums_by_courses": [[_forum()]],
+            "mod_forum_get_forum_access_information": [{"canreplypost": True, "warnings": []}],
+            "mod_forum_get_discussion_post": [
+                {
+                    "post": {
+                        "discussionid": 61,
+                        "subject": "Pregunta",
+                        "capabilities": {"reply": can_reply},
+                    },
+                    "warnings": [],
+                }
+            ],
+            "core_group_get_activity_groupmode": [{"groupmode": 1, "warnings": []}],
+            "core_group_get_activity_allowed_groups": [
+                {
+                    "groups": [{"id": 3, "name": "Grupo A"}],
+                    "canaccessallgroups": False,
+                    "warnings": [],
+                }
+            ],
+            "mod_forum_get_forum_discussions": [
+                {
+                    "discussions": [
+                        {
+                            "discussion": 61,
+                            "forum": 11,
+                            "course": 5,
+                            "name": "Pregunta inicial",
+                            "groupid": discussion_group,
+                        }
+                    ],
+                    "warnings": [],
+                }
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_forum_reply_to_all_participants_discussion_defers_to_moodle_capability() -> None:
+    preview = await preview_reply_forum_post(
+        _group_forum_reply_invoke(-1),
+        course_id=5,
+        forum_id=11,
+        parent_post_id=41,
+        message="Resposta",
+    )
+
+    assert preview["allowed"] is True
+    # The reply reaches everyone, so the audience must not claim a single group.
+    assert preview["audience"] == {"scope": "course", "course_id": 5}
+
+
+@pytest.mark.asyncio
+async def test_forum_reply_to_all_participants_discussion_still_needs_reply_capability() -> None:
+    preview = await preview_reply_forum_post(
+        _group_forum_reply_invoke(-1, can_reply=False),
+        course_id=5,
+        forum_id=11,
+        parent_post_id=41,
+        message="Resposta",
+    )
+
+    assert preview["allowed"] is False
+    assert preview["code"] == "cannot_reply"
+
+
+@pytest.mark.asyncio
+async def test_forum_reply_to_other_group_discussion_is_still_a_mismatch() -> None:
+    preview = await preview_reply_forum_post(
+        _group_forum_reply_invoke(5),
+        course_id=5,
+        forum_id=11,
+        parent_post_id=41,
+        message="Resposta",
+    )
+
+    assert preview["allowed"] is False
+    assert preview["code"] == "discussion_group_mismatch"
+
+
 @pytest.mark.asyncio
 async def test_choice_preview_resolves_exact_text_and_execution_writes_once() -> None:
     preview_invoke = FakeInvoke(

@@ -11,11 +11,14 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .exam_catalog import normalise_academic_year
+from platformdirs import user_config_path
+
+from .domain import MADRID
+from .exam_catalog import normalise_academic_year, normalise_subject_code
 from .security import UnsafeUrlError, validate_usc_url
 
 _DEGREE_PATH = re.compile(
@@ -26,6 +29,23 @@ _GROUP = re.compile(r"[A-Z0-9_-]{1,40}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _PROFILE_MAX_BYTES = 64 * 1024
 _PROFILE_FILE_ENV = "USC_ACADEMIC_PROFILE_FILE"
+DEFAULT_PROFILE_FILENAME = "perfil.json"
+
+
+def default_profile_path() -> Path:
+    """Per-user profile written by `mcp-usc setup` and read when no variable overrides it."""
+
+    return user_config_path("mcp-usc", appauthor=False) / DEFAULT_PROFILE_FILENAME
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def madrid_today() -> date:
+    """Current calendar date in Europe/Madrid, independent of the host timezone."""
+
+    return _utc_now().astimezone(MADRID).date()
 
 
 class AcademicProfileError(ValueError):
@@ -59,12 +79,16 @@ def _degree_url(value: object) -> str:
 
 
 def _positive_int(value: object, name: str, *, maximum: int) -> int:
+    # Only real ints or ASCII-digit text: no bools, floats (2.9 must not become 2),
+    # bytes, or non-ASCII digits that int() would silently accept.
     if isinstance(value, bool):
         raise AcademicProfileError(f"{name} debe ser un entero positivo")
-    try:
-        result = int(value) if not isinstance(value, str) or value.strip() else 0
-    except (TypeError, ValueError):
-        raise AcademicProfileError(f"{name} debe ser un entero positivo") from None
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        result = int(value.strip())
+    else:
+        raise AcademicProfileError(f"{name} debe ser un entero positivo")
     if not 1 <= result <= maximum:
         raise AcademicProfileError(f"{name} debe estar entre 1 y {maximum}")
     return result
@@ -74,6 +98,22 @@ def _optional_positive_int(value: object, name: str, *, maximum: int) -> int | N
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     return _positive_int(value, name, maximum=maximum)
+
+
+def _text_list(value: object, name: str, *, maximum: int) -> tuple[str, ...]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ()
+    if isinstance(value, str):
+        values = [item.strip() for item in re.split(r"[;,\n]", value)]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        raise AcademicProfileError(f"{name} debe ser una lista o texto separado por ;")
+    if len(values) > maximum:
+        raise AcademicProfileError(f"{name} admite como máximo {maximum} elementos")
+    if not all(isinstance(item, str) for item in values):
+        raise AcademicProfileError(f"Cada elemento de {name} debe ser texto")
+    return tuple(item for item in values if item)
 
 
 def _groups(value: object) -> tuple[str, ...]:
@@ -125,24 +165,94 @@ def _inferred_semester(today: date) -> int:
     return 1 if today.month in {1, 9, 10, 11, 12} else 2
 
 
+def _resolve_context(
+    *,
+    academic_year: str | None,
+    semester: int | None,
+    date_in_week: str | None,
+    today: date | None = None,
+) -> tuple[str, int, str | None]:
+    current = today or madrid_today()
+    if academic_year is None:
+        resolved_year = _inferred_academic_year(current)
+    else:
+        try:
+            resolved_year = normalise_academic_year(academic_year)
+        except (TypeError, ValueError):
+            raise AcademicProfileError(
+                "academic_year debe tener formato consecutivo YYYY/YYYY"
+            ) from None
+    if semester is None:
+        resolved_semester = _inferred_semester(current)
+    else:
+        resolved_semester = _positive_int(semester, "semester", maximum=2)
+        if resolved_semester not in {1, 2}:
+            raise AcademicProfileError("semester debe ser 1 o 2")
+    return resolved_year, resolved_semester, _date(date_in_week, "date_in_week")
+
+
+def resolve_academic_context(
+    profile: AcademicProfile | None,
+    *,
+    academic_year: str | None = None,
+    semester: int | None = None,
+    date_in_week: str | None = None,
+    today: date | None = None,
+) -> tuple[str, int, str | None]:
+    """Academic year, semester and week from explicit values, the profile, then today."""
+
+    if profile is not None:
+        return profile.resolve(
+            academic_year=academic_year,
+            semester=semester,
+            date_in_week=date_in_week,
+            today=today,
+        )
+    return _resolve_context(
+        academic_year=academic_year, semester=semester, date_in_week=date_in_week, today=today
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AcademicProfile:
     """Selección académica persistida localmente, sin secretos."""
 
     degree_url: str
-    course_number: int
+    # Only the whole-course timetable (get_my_class_timetable) needs a course; students
+    # with subjects from several courses or degrees leave it out.
+    course_number: int | None = None
     program_id: int | None = None
     group_codes: tuple[str, ...] = ()
     academic_year: str | None = None
     semester: int | None = None
     date_in_week: str | None = None
+    # Other degrees where the student also has subjects (SICUE, double degrees, electives
+    # from another degree). They widen where subject codes are looked up first.
+    extra_degree_urls: tuple[str, ...] = ()
+    # Optional explicit subject codes, for students who do not sign in to Moodle.
+    subject_codes: tuple[str, ...] = ()
     source: str = "environment"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "degree_url", _degree_url(self.degree_url))
+        if self.course_number is not None:
+            object.__setattr__(
+                self,
+                "course_number",
+                _positive_int(self.course_number, "course_number", maximum=12),
+            )
+        extra = _text_list(self.extra_degree_urls, "extra_degree_urls", maximum=5)
         object.__setattr__(
-            self, "course_number", _positive_int(self.course_number, "course_number", maximum=12)
+            self,
+            "extra_degree_urls",
+            tuple(dict.fromkeys(_degree_url(url) for url in extra if url != self.degree_url)),
         )
+        codes = _text_list(self.subject_codes, "subject_codes", maximum=40)
+        try:
+            normalised = tuple(dict.fromkeys(normalise_subject_code(code) for code in codes))
+        except ValueError as exc:
+            raise AcademicProfileError(f"subject_codes no es válido: {exc}") from None
+        object.__setattr__(self, "subject_codes", normalised)
         object.__setattr__(
             self,
             "program_id",
@@ -167,6 +277,12 @@ class AcademicProfile:
         if not isinstance(self.source, str) or not self.source.strip():
             raise AcademicProfileError("source de perfil no válido")
 
+    @property
+    def degree_urls(self) -> tuple[str, ...]:
+        """Main degree first, then the extra ones: where subject codes are looked up."""
+
+        return (self.degree_url, *self.extra_degree_urls)
+
     def resolve(
         self,
         *,
@@ -177,27 +293,12 @@ class AcademicProfile:
     ) -> tuple[str, int, str | None]:
         """Resuelve contexto explícito, perfil y finalmente defaults acotados."""
 
-        current = today or date.today()
-        if academic_year is None:
-            resolved_year = self.academic_year or _inferred_academic_year(current)
-        else:
-            try:
-                resolved_year = normalise_academic_year(academic_year)
-            except (TypeError, ValueError):
-                raise AcademicProfileError(
-                    "academic_year debe tener formato consecutivo YYYY/YYYY"
-                ) from None
-        if semester is None:
-            resolved_semester = self.semester or _inferred_semester(current)
-        else:
-            resolved_semester = _positive_int(semester, "semester", maximum=2)
-            if resolved_semester not in {1, 2}:
-                raise AcademicProfileError("semester debe ser 1 o 2")
-        resolved_date = _date(
-            self.date_in_week if date_in_week is None else date_in_week,
-            "date_in_week",
+        return _resolve_context(
+            academic_year=academic_year if academic_year is not None else self.academic_year,
+            semester=semester if semester is not None else self.semester,
+            date_in_week=date_in_week if date_in_week is not None else self.date_in_week,
+            today=today,
         )
-        return resolved_year, resolved_semester, resolved_date
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -210,6 +311,8 @@ class AcademicProfile:
             "academic_year": self.academic_year,
             "semester": self.semester,
             "date_in_week": self.date_in_week,
+            "extra_degree_urls": list(self.extra_degree_urls),
+            "subject_codes": list(self.subject_codes),
             "read_only": True,
         }
 
@@ -248,6 +351,8 @@ def load_academic_profile(env: Mapping[str, str] | None = None) -> AcademicProfi
     source = "environment"
     environ = os.environ if env is None else env
     profile_file = _first(environ, _PROFILE_FILE_ENV)
+    if not profile_file and env is None and default_profile_path().is_file():
+        profile_file = str(default_profile_path())
     if profile_file:
         values.update(_profile_file(profile_file))
         source = "file"
@@ -256,6 +361,8 @@ def load_academic_profile(env: Mapping[str, str] | None = None) -> AcademicProfi
             "course": "course_number",
             "program": "program_id",
             "groups": "group_codes",
+            "extra_degrees": "extra_degree_urls",
+            "subjects": "subject_codes",
         }
         for old, new in file_aliases.items():
             if old in values:
@@ -289,6 +396,8 @@ def load_academic_profile(env: Mapping[str, str] | None = None) -> AcademicProfi
         "academic_year": ("USC_ACADEMIC_YEAR",),
         "semester": ("USC_ACADEMIC_SEMESTER",),
         "date_in_week": ("USC_ACADEMIC_DATE_IN_WEEK",),
+        "extra_degree_urls": ("USC_ACADEMIC_EXTRA_DEGREE_URLS",),
+        "subject_codes": ("USC_ACADEMIC_SUBJECT_CODES",),
     }
     for key, names in aliases.items():
         value = _first(environ, *names)
@@ -296,10 +405,8 @@ def load_academic_profile(env: Mapping[str, str] | None = None) -> AcademicProfi
             values[key] = value
     if not values:
         return None
-    if "degree_url" not in values or "course_number" not in values:
-        raise AcademicProfileError(
-            "El perfil académico requiere degree_url y course_number explícitos"
-        )
+    if "degree_url" not in values:
+        raise AcademicProfileError("El perfil académico requiere degree_url explícito")
     allowed = {
         "degree_url",
         "course_number",
@@ -308,6 +415,8 @@ def load_academic_profile(env: Mapping[str, str] | None = None) -> AcademicProfi
         "academic_year",
         "semester",
         "date_in_week",
+        "extra_degree_urls",
+        "subject_codes",
     }
     unknown = set(values).difference(allowed)
     if unknown:

@@ -3,21 +3,33 @@
 Esta guía lleva una instalación nueva desde el clon hasta la primera consulta. `mcp-usc` se ejecuta
 en tu equipo y se comunica con el Campus por HTTP; el cliente MCP se comunica con él por STDIO.
 
-## 1. Requisitos
+## 1. Instalación rápida
 
-- Windows, Linux o macOS;
-- Python 3.11 o posterior;
-- [`uv`](https://docs.astral.sh/uv/) recomendado;
-- una cuenta USC activa para consultar datos privados.
+Solo necesitas [`uv`](https://docs.astral.sh/uv/getting-started/installation/); él se encarga de
+Python.
 
-Las búsquedas públicas de grados, planes, horarios lectivos y exámenes no necesitan una cuenta.
+```sh
+uv tool install "mcp-usc[browser-auth] @ https://github.com/PabloPC05/mcp-usc/archive/refs/heads/main.zip"
+mcp-usc setup
+```
 
-## 2. Instalar
+El asistente `setup` hace en orden lo que el resto de esta guía explica paso a paso:
 
-```powershell
+1. inicia sesión en el Campus con tu Chrome o Edge (o importa la cookie `MoodleSession`);
+2. guarda tu grado y tu curso en un perfil local, para `get_my_class_timetable` y
+   `get_my_official_exam_schedule`;
+3. añade el servidor a Claude Desktop, Claude Code o Codex, preguntando antes de tocar cada uno.
+
+Las búsquedas públicas de grados, planes, horarios y exámenes funcionan sin cuenta.
+
+## 2. Instalación desde el código
+
+Para desarrollar, o si prefieres trabajar desde un clon:
+
+```sh
 git clone https://github.com/PabloPC05/mcp-usc.git
 cd mcp-usc
-uv sync
+uv sync --extra dev --extra browser-auth
 uv run mcp-usc doctor
 uv run mcp-usc manifest --compact
 ```
@@ -26,17 +38,18 @@ uv run mcp-usc manifest --compact
 muestra su valor y no contacta con el Campus. Un estado `public_only` es válido: significa que las
 herramientas públicas están listas y falta configurar acceso privado.
 
-`manifest` también es local y exporta el contrato exacto que verá un cliente: 91 herramientas,
+`manifest` también es local y exporta el contrato exacto que verá un cliente: 92 herramientas,
 cuatro recursos, cuatro prompts y un SHA-256 determinista. Sirve para diagnóstico y revisión sin
 arrancar una conexión con Moodle.
 
-Para desarrollar o ejecutar la suite completa:
+Para ejecutar la suite completa:
 
-```powershell
-uv sync --extra dev
+```sh
 uv run ruff check .
 uv run pytest
 ```
+
+Desde un clon, antepón `uv run` a los comandos `mcp-usc` de esta guía.
 
 ## 3. Autenticarse
 
@@ -52,9 +65,9 @@ Es la ruta habitual cuando la USC no ofrece al alumno un token de Web Services.
 4. Copia solo el valor de `MoodleSession`.
 5. Ejecuta el prompt oculto y pega el valor:
 
-```powershell
-uv run mcp-usc import-session
-uv run mcp-usc status
+```sh
+mcp-usc import-session
+mcp-usc status
 ```
 
 La cookie se valida mediante HTTP antes de guardarse en el almacén seguro del sistema. No la pongas
@@ -62,8 +75,8 @@ en el comando, en `.env`, en una captura, en una incidencia ni en un archivo del
 
 Para borrar solo la copia local, sin cerrar ni modificar la sesión remota:
 
-```powershell
-uv run mcp-usc forget-session
+```sh
+mcp-usc forget-session
 ```
 
 ### B. Login asistido con Microsoft/MFA
@@ -71,12 +84,14 @@ uv run mcp-usc forget-session
 Esta opción abre temporalmente un navegador visible. Después del login, todas las consultas vuelven
 a usar HTTP y el navegador se cierra.
 
-```powershell
-uv sync --extra browser-auth
-uv run playwright install chromium
-uv run mcp-usc login
-uv run mcp-usc status
+```sh
+mcp-usc login
+mcp-usc status
 ```
+
+Usa el Chrome o Edge instalado. Si no tienes ninguno (solo Safari o Firefox), te ofrece descargar
+una vez un navegador solo para el login (WebKit en macOS, Chromium en el resto); sin preguntar,
+`mcp-usc login --install-browser`.
 
 Completa personalmente Microsoft Entra y MFA. El programa no recibe ni guarda tu contraseña.
 
@@ -87,7 +102,7 @@ en Moodle no garantiza que ese servicio la habilite.
 
 ```powershell
 $env:USC_MOODLE_TOKEN = "..."
-uv run mcp-usc status
+mcp-usc status
 ```
 
 También puedes apuntar a un archivo local protegido con `USC_MOODLE_TOKEN_FILE`. No intentes obtener
@@ -95,46 +110,22 @@ un token enviando tu contraseña a `login/token.php` y nunca confirmes un token 
 
 ## 4. Conectar un cliente MCP
 
-Con Codex CLI en Windows, sustituye la ruta por la del clon:
+`mcp-usc setup` lo hace por ti. A mano, `mcp-usc client-config` imprime el comando exacto para
+Claude Code y Codex, y el bloque JSON para Claude Desktop y otros clientes, con la ruta absoluta de
+tu instalación (las apps de escritorio no siempre ven tu `PATH`).
 
-```powershell
-codex mcp add usc-campus -- uv --directory C:\ruta\absoluta\mcp-usc run mcp-usc serve
-codex mcp list
-```
-
-Para que `get_my_class_timetable` conozca tu selección sin repetirla, añade al servidor un perfil
-académico local. Estos valores no son credenciales ni modifican la matrícula:
-
-```powershell
-codex mcp remove usc-campus
-codex mcp add usc-campus --env USC_ACADEMIC_DEGREE_URL="https://www.usc.gal/gl/estudos/graos/AREA/TITULACION" --env USC_ACADEMIC_COURSE_NUMBER="2" --env USC_ACADEMIC_PROGRAM_ID="ID_PUBLICADO" -- uv --directory C:\ruta\absoluta\mcp-usc run mcp-usc serve
-```
-
-`USC_ACADEMIC_PROGRAM_ID` es opcional si la USC solo publica un plan inequívoco. También se pueden
-configurar `USC_ACADEMIC_GROUP_CODES`, `USC_ACADEMIC_YEAR` y `USC_ACADEMIC_SEMESTER`, o indicar un
-JSON local mediante `USC_ACADEMIC_PROFILE_FILE`. Reinicia Codex después de cambiar el perfil.
-
-La configuración STDIO equivalente para otros clientes compatibles es:
-
-```json
-{
-  "mcpServers": {
-    "usc-campus": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\ruta\\absoluta\\mcp-usc",
-        "run",
-        "mcp-usc",
-        "serve"
-      ]
-    }
-  }
-}
-```
+El perfil académico que guarda `setup` vive en la carpeta de configuración del usuario
+(`perfil.json`). También puedes definirlo con variables, que tienen prioridad:
+`USC_ACADEMIC_PROFILE_FILE`, o bien `USC_ACADEMIC_DEGREE_URL`, `USC_ACADEMIC_COURSE_NUMBER`,
+`USC_ACADEMIC_PROGRAM_ID`, `USC_ACADEMIC_GROUP_CODES`, `USC_ACADEMIC_YEAR` y
+`USC_ACADEMIC_SEMESTER`. Estos valores no son credenciales ni modifican la matrícula.
+`USC_ACADEMIC_PROGRAM_ID` solo hace falta si la USC publica varios planes con el mismo nombre.
 
 Reinicia el cliente después de cambiar su configuración. Si admite aprobación por tipo de
 herramienta, configura las escrituras para que siempre pidan permiso (`writes`).
+
+Para usar el servidor desde otro equipo o agente, sírvelo por HTTP: ver
+[Servirlo por HTTP](deployment.md).
 
 ## 5. Primera comprobación
 
@@ -177,7 +168,7 @@ Las subidas están desactivadas hasta definir una carpeta permitida existente:
 ```powershell
 $env:USC_UPLOAD_ROOT = "C:\Users\TU_USUARIO\Documents\mcp-usc-uploads"
 $env:USC_MAX_UPLOAD_BYTES = "52428800"
-uv run mcp-usc doctor
+mcp-usc doctor
 ```
 
 Solo se aceptan archivos regulares dentro de esa carpeta. La previsualización presenta nombres,
