@@ -100,6 +100,8 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "preview_submit_choice_response",
         "preview_submit_assignment",
         "read_course_resource",
+        "preview_download_course_files",
+        "download_course_files",
         "remove_submission",
         "replace_submission_files",
         "reply_forum_post",
@@ -113,7 +115,7 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "submit_choice_response",
     }
     by_name = {tool.name: tool for tool in response.tools}
-    assert len(response.tools) == 92
+    assert len(response.tools) == 94
     documented_names = {
         name for group_names in CAPABILITY_TOOL_GROUPS.values() for name in group_names
     }
@@ -162,11 +164,12 @@ async def test_stdio_server_advertises_read_tools_and_one_confirmed_write() -> N
         "preview_update_activity_completion_status_manually",
         "preview_mark_course_self_completed",
         "preview_submit_choice_response",
+        "preview_download_course_files",
     }
     assert all(by_name[name].annotations.readOnlyHint is False for name in write_names)
     assert all(by_name[name].annotations.destructiveHint is True for name in write_names)
     assert all(by_name[name].annotations.idempotentHint is False for name in preview_names)
-    stateful_read_names = {"inspect_submission_status"}
+    stateful_read_names = {"inspect_submission_status", "download_course_files"}
     assert len(write_names) == TOOL_INVENTORY["effects"]
     assert len(preview_names) == TOOL_INVENTORY["previews"]
     assert len(stateful_read_names) == TOOL_INVENTORY["stateful_reads"]

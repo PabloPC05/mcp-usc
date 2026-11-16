@@ -5,11 +5,11 @@ from . import __version__
 PROJECT_URL = "https://github.com/PabloPC05/mcp-usc"
 
 TOOL_INVENTORY = {
-    "total": 92,
+    "total": 94,
     "read_only": 50,
-    "previews": 21,
+    "previews": 22,
     "effects": 20,
-    "stateful_reads": 1,
+    "stateful_reads": 2,
 }
 
 RESOURCE_URIS = {
@@ -87,6 +87,8 @@ CAPABILITY_TOOL_GROUPS = {
         "list_course_contents",
         "list_course_resources",
         "read_course_resource",
+        "preview_download_course_files",
+        "download_course_files",
         "list_exam_sources",
         "search_exam_dates",
         "list_usc_degrees",

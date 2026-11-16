@@ -28,6 +28,12 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 
 ### Añadido
 
+- comandos de terminal `pendientes`, `horario`, `examenes`, `cursos`, `materiales` y `descargar`,
+  con `--json`; las asignaturas se eligen por número, código, nombre o siglas (`ia`, `soi`);
+- descarga de los archivos y carpetas de una asignatura (`mcp-usc descargar` y, con vista previa y
+  confirmación, `preview_download_course_files`/`download_course_files`), incremental y por
+  secciones. Con la sesión de alumno abre cada material como el navegador, lo que Moodle registra;
+  con token usa la URL directa;
 - instalación en un paso con `uv tool install` y asistente `mcp-usc setup`: login con el Chrome o
   Edge instalado, perfil académico guardado en la carpeta de configuración del usuario y registro
   en Claude Desktop, Claude Code o Codex con confirmación;

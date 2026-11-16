@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from platformdirs import user_data_path
+from platformdirs import user_data_path, user_downloads_path
 
 from .academic_profile import AcademicProfile, load_academic_profile
 from .request_credentials import current_moodle_token
@@ -31,6 +31,8 @@ class Settings:
     public_cache_max_entries: int = 512
     public_cache_max_total_bytes: int = 64_000_000
     academic_profile: AcademicProfile | None = None
+    # Where course files are downloaded (USC_DOWNLOAD_ROOT); one folder per course inside.
+    download_root: Path | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -42,6 +44,12 @@ class Settings:
             token = Path(token_file).expanduser().read_text(encoding="utf-8").strip() or None
         upload_root_value = os.getenv("USC_UPLOAD_ROOT", "").strip()
         upload_root = Path(upload_root_value).expanduser().resolve() if upload_root_value else None
+        download_root_value = os.getenv("USC_DOWNLOAD_ROOT", "").strip()
+        download_root = (
+            Path(download_root_value).expanduser().resolve()
+            if download_root_value
+            else Path(user_downloads_path()) / "mcp-usc"
+        )
         max_upload_bytes = int(os.getenv("USC_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
         if not 1 <= max_upload_bytes <= 100 * 1024 * 1024:
             raise ValueError("USC_MAX_UPLOAD_BYTES debe estar entre 1 y 104857600")
@@ -89,4 +97,5 @@ class Settings:
             public_cache_max_entries=public_cache_max_entries,
             public_cache_max_total_bytes=public_cache_max_total_bytes,
             academic_profile=load_academic_profile(),
+            download_root=download_root,
         )

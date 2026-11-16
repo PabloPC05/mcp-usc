@@ -98,6 +98,6 @@ La caché solo sirve GET públicos anónimos que han superado validación estric
 ## Pruebas
 
 La suite reemplaza HTTP, keyring, formularios, subidas y descargas con dobles. El test STDIO arranca
-el servidor como lo haría un cliente real, enumera 92 herramientas, cuatro recursos y cuatro
+el servidor como lo haría un cliente real, enumera 94 herramientas, cuatro recursos y cuatro
 prompts, verifica las anotaciones y renderiza ejemplos por el protocolo real.
 La auditoría de la demo oficial de Moodle es opt-in, bloquea comunicaciones y no se ejecuta en CI.

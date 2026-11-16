@@ -43,6 +43,8 @@ INSTRUCTIONS = (
     "mediante su herramienta preview y recibir una confirmación nueva del usuario. "
     "Nunca llames inspect_submission_status sin mostrar preview_inspect_submission_status y "
     "recibir una confirmacion nueva del usuario; esta lectura puede registrar vista/completion. "
+    "Lo mismo con download_course_files: muestra preview_download_course_files y espera la "
+    "confirmación, porque con sesión Moodle registra que se abrió cada material. "
     "Las acciones genéricas de alumno también exigen preview_student_action y una confirmación "
     "nueva; nunca uses call_student_read con una función de seguimiento o escritura. "
     "La aceptación de políticas o consentimientos legales se realiza siempre manualmente en la "
@@ -673,6 +675,22 @@ async def list_course_resources(
 ) -> dict:
     """Lista archivos descargables y crea referencias locales seguras para leerlos."""
     return await _service().list_course_resources(course_id, section_id, offset, limit)
+
+
+@mcp.tool(annotations=PREVIEW)
+async def preview_download_course_files(
+    course_id: int, module_ids: list[int] | None = None
+) -> dict:
+    """Prepara descargar los archivos de una materia a la carpeta local; no descarga nada."""
+    return await _service().preview_download_course_files(course_id, module_ids)
+
+
+@mcp.tool(annotations=STATEFUL_READ)
+async def download_course_files(
+    course_id: int, module_ids: list[int] | None, confirmation_token: str
+) -> dict:
+    """Descarga los archivos confirmados; con sesión, Moodle registra que se abrieron."""
+    return await _service().download_course_files(course_id, module_ids, confirmation_token)
 
 
 @mcp.tool(annotations=READ_ONLY)
