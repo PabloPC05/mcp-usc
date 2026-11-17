@@ -1,4 +1,4 @@
-"""Logging in with the browser you already have: Chrome, Edge, Brave or Chromium.
+"""Logging in with the browser you already have: Chrome, Edge, Brave, Chromium or Helium.
 
 Chromium browsers speak the DevTools protocol. Started with a profile folder of their own
 and ``--remote-debugging-port=0`` they write the port they chose to ``DevToolsActivePort``,
@@ -39,6 +39,7 @@ _MAC = (
     ("msedge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
     ("brave", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
     ("chromium", "/Applications/Chromium.app/Contents/MacOS/Chromium"),
+    ("helium", "/Applications/Helium.app/Contents/MacOS/Helium"),  # helium.computer
 )
 _WINDOWS = (
     ("chrome", r"Google\Chrome\Application\chrome.exe"),

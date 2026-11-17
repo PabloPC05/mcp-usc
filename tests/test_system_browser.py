@@ -88,3 +88,21 @@ async def test_login_prefers_your_browser_over_playwright(tmp_path, monkeypatch)
     monkeypatch.setattr(system_browser, "find_browser", lambda: None)
     await campus.interactive_login(_settings(tmp_path), timeout=60)
     assert used == [("system", True), ("playwright", False)] and stored == ["good", "good"]
+
+
+def test_helium_is_found_on_a_mac(monkeypatch, tmp_path):
+    """Helium (helium.computer) is Chromium: found like the others, last of them."""
+
+    monkeypatch.delenv("USC_LOGIN_BROWSER", raising=False)
+    monkeypatch.setattr(system_browser.sys, "platform", "darwin")
+    monkeypatch.setattr(system_browser.Path, "home", lambda: tmp_path)
+    app = tmp_path / "Applications/Helium.app/Contents/MacOS/Helium"
+    app.parent.mkdir(parents=True)
+    app.write_text("")
+    real_exists = system_browser.Path.exists
+
+    def exists(path):  # nothing in the real /Applications: only the fake home's Helium
+        return str(path).startswith(str(tmp_path)) and real_exists(path)
+
+    monkeypatch.setattr(system_browser.Path, "exists", exists)
+    assert system_browser.find_browser() == ("helium", str(app))
