@@ -33,6 +33,8 @@ dependencies = [
   # stopped matching template contents with select(), which broke every USC parser.
   "soupsieve>=2.5,<3",
   "tzdata>=2025.2",
+  # The login window in your own Chrome/Edge/Brave (DevTools), with nothing to download.
+  "websockets>=13,<16",
 ]
 
 [project.optional-dependencies]

@@ -16,6 +16,13 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### Entrar con tu propio navegador, sin descargar ninguno
+
+- la ventana de login (y la renovación sin ventana) usan el Chrome, Edge, Brave o Chromium que ya
+  tengas, por el protocolo DevTools, con un perfil propio que no toca tus pestañas ni tus datos:
+  no hace falta Playwright (unos 160 MB) para entrar; `USC_LOGIN_BROWSER` elige otro ejecutable;
+- sin ninguno de esos (un Mac solo con Safari), siguen el extra `browser-auth` o pegar la cookie.
+
 ### Cerrar sesión de verdad y sesiones sin llavero
 
 - `end_campus_session` cierra la sesión en el propio Campus (`login/logout.php` con su sesskey),
