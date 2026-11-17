@@ -405,6 +405,62 @@ async def test_delete_assignment_without_the_button_touches_nothing() -> None:
     assert len(http.get_calls) == 1 and http.post_calls == []
 
 
+async def test_replacing_at_the_file_limit_makes_room_before_uploading() -> None:
+    """With maxfiles reached Moodle hides «Engadir» until the old file leaves the draft."""
+
+    full = (
+        '<a href="/repository/draftfiles_manager.php?action=deletedraft&amp;itemid=88&amp;'
+        'filepath=%2F&amp;filename=old.pdf&amp;sesskey=abc123">Eliminar old.pdf</a>'
+    )
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", _filemanager_assignment_form()),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", full),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", "<p>Eliminado</p>"),
+            FormResponse(
+                f"{BASE}/repository/draftfiles_manager.php", _draft_manager(with_file=False)
+            ),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_plugins()),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_upload_form()),
+        ]
+    )
+
+    result = await http.client().replace_assignment_files(
+        17,
+        [FormUpload("new.pdf", b"%PDF-1.4 blank", "application/pdf")],
+        confirmed=True,
+    )
+
+    assert result["request_sent"] is True
+    assert "deletedraft" in http.get_calls[2][0]  # the old file left the draft first
+    assert len(http.multipart_calls) == 1 and len(http.post_calls) == 1
+
+
+async def test_when_room_does_not_help_nothing_is_saved() -> None:
+    full = (
+        '<a href="/repository/draftfiles_manager.php?action=deletedraft&amp;itemid=88&amp;'
+        'filepath=%2F&amp;filename=old.pdf&amp;sesskey=abc123">Eliminar old.pdf</a>'
+    )
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", _filemanager_assignment_form()),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", full),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", "<p>Eliminado</p>"),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", "<p>Sen engadir</p>"),
+        ]
+    )
+
+    result = await http.client().replace_assignment_files(
+        17,
+        [FormUpload("new.pdf", b"%PDF-1.4 blank", "application/pdf")],
+        confirmed=True,
+    )
+
+    assert result["diagnostic"]["code"] == "upload_repository_not_found"
+    assert "sigue como estaba" in result["diagnostic"]["message"]
+    assert http.post_calls == [] and http.multipart_calls == []  # never saved
+
+
 async def test_delete_assignment_files_requires_confirmation_before_page_view() -> None:
     http = FakeHttp([])
 
