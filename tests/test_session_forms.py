@@ -325,7 +325,39 @@ async def test_assignment_status_reads_the_status_table_and_the_submit_step() ->
         "Tempo restante": "A tarefa está atrasada por: 284 días",
     }
     assert result["submit_for_grading_available"] is True
+    assert result["feedback"] == {} and result["feedback_files"] == []
     assert http.post_calls == []
+
+
+async def test_assignment_status_reads_the_grade_and_the_teachers_feedback() -> None:
+    page = """
+    <div class="submissionstatustable"><table>
+      <tr><th>Estado das cualificacións</th><td>Cualificado</td></tr>
+    </table></div>
+    <div class="feedback"><table class="generaltable">
+      <tr><th>Cualificación</th><td>9,0 / 10,0</td></tr>
+      <tr><th>Cualificado por</th>
+        <td><span class="userinitials">AP</span><a href="#">Ana Proba</a></td></tr>
+      <tr><th>Comentarios</th><td><p>Moi ben.</p><p>Revisa o apartado 3.</p></td></tr>
+      <tr><th>Ficheiros de comentarios</th><td>
+        <a href="https://cv.usc.es/pluginfile.php/1/assignfeedback_file/x/correccion.pdf">correccion.pdf</a>
+      </td></tr>
+    </table></div>
+    """
+    http = FakeHttp([FormResponse(f"{BASE}/mod/assign/view.php?id=17", page)])
+
+    result = await http.client().assignment_status(17)
+
+    assert result["rows"] == {"Estado das cualificacións": "Cualificado"}
+    assert result["feedback"]["Cualificación"] == "9,0 / 10,0"
+    assert result["feedback"]["Cualificado por"] == "Ana Proba"
+    assert result["feedback"]["Comentarios"] == "Moi ben.\n\nRevisa o apartado 3."
+    assert result["feedback_files"] == [
+        {
+            "name": "correccion.pdf",
+            "url": "https://cv.usc.es/pluginfile.php/1/assignfeedback_file/x/correccion.pdf",
+        }
+    ]
 
 
 async def test_delete_assignment_follows_moodle4_confirmation_page() -> None:

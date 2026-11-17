@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup, Tag
 
-from .security import html_to_text, validate_usc_url
+from .security import html_to_paragraphs, html_to_text, validate_usc_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,10 +634,32 @@ class MoodleSessionForms:
             form.defaults.get("action") == "submit"
             for form in self._forms(response, frozenset({_ASSIGN_PATH}))
         )
+        # «Comentarios»: the grade, when and by whom, the teacher's words and files.
+        feedback: dict[str, str] = {}
+        feedback_files: list[dict[str, str]] = []
+        box = soup.select_one(".feedback")
+        if box is not None:
+            # Avatars and their initials («FA») are not part of the grader's name.
+            for decoration in box.select(".userinitials, img, .userpicture"):
+                decoration.decompose()
+            for row in box.select("tr")[:20]:
+                header, value = row.find("th"), row.find("td")
+                if header is None or value is None:
+                    continue
+                label = " ".join(header.get_text(" ", strip=True).split())[:80]
+                text = html_to_paragraphs(str(value), limit=4_000)
+                if label and text and label not in feedback:
+                    feedback[label] = text
+            for anchor in box.select("a[href*='pluginfile.php']")[:20]:
+                name = " ".join(anchor.get_text(" ", strip=True).split())[:200]
+                if name:
+                    feedback_files.append({"name": name, "url": str(anchor.get("href"))})
         return {
             "operation": "assignment_status",
             "course_module_id": course_module_id,
             "rows": rows,
+            "feedback": feedback,
+            "feedback_files": feedback_files,
             "submit_for_grading_available": submit_step,
             "content_is_untrusted": True,
         }

@@ -16,6 +16,11 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### La nota de cada entrega
+
+- la inspección confirmada de una entrega trae también su corrección: «Cualificación», cuándo y
+  quién la corrigió, el comentario (con sus párrafos) y los archivos de corrección.
+
 ### Notas, foros, cuestionarios y mensajes con la sesión de alumno
 
 - con la sesión HTTP, la USC no expone por AJAX las notas, la lista de debates de un foro ni los
