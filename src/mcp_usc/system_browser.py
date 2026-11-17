@@ -56,6 +56,7 @@ _LINUX = (
     ("chromium", "chromium-browser"),
 )
 _PORT_FILE = "DevToolsActivePort"
+_CLOSING_GRACE = 15  # seconds a closing browser gets to save its profile
 
 
 class SystemBrowserError(RuntimeError):
@@ -194,6 +195,7 @@ async def capture_session(
     )
     started = time.monotonic()
     rejected: set[str] = set()
+    closed = False
     try:
         port, path = await _port_file(profile, process)
         async with websockets.connect(
@@ -212,6 +214,7 @@ async def capture_session(
                         if await _cookie_is_authenticated(settings, value):
                             with contextlib.suppress(Exception):
                                 await devtools.call("Browser.close")
+                                closed = True
                             return value
                         rejected.add(value)  # a guest cookie: Moodle issues a new one later
                 if give_up_after is not None and time.monotonic() - started > give_up_after:
@@ -223,6 +226,12 @@ async def capture_session(
             raise SystemBrowserError("Cerraste la ventana antes de entrar.") from exc
         raise SystemBrowserError("No se pudo hablar con el navegador.") from exc
     finally:
+        if closed and process.returncode is None:
+            # A browser told to close writes its cookies to disk on the way out, Microsoft's
+            # «stay signed in» among them (set a moment ago, Chromium only saves cookies every
+            # so often). Killing it now would lose them, and the silent renewal with them.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=_CLOSING_GRACE)
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
