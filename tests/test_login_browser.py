@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,9 @@ async def test_login_profile_is_remembered_per_browser(tmp_path):
     assert tried == ["chrome", "msedge", "chromium"]
     assert all(options["headless"] is True for _, options in playwright.chromium.calls)
     profile = tmp_path / "profile" / "chromium"
-    assert profile.is_dir() and (profile.stat().st_mode & 0o777) == 0o700
+    assert profile.is_dir()
+    if os.name != "nt":  # Windows has no POSIX modes
+        assert (profile.stat().st_mode & 0o777) == 0o700
     assert not (tmp_path / "profile" / "chrome").exists()
 
 
