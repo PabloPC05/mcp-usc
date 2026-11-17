@@ -35,8 +35,9 @@ def test_store_then_load_round_trips_and_uses_private_permissions() -> None:
     assert cache.load(key) == {"a": [1, 2], "b": "ñ"}
     assert cache.load(["2026/2027", ["G2"], None, True]) is None
     (file,) = cache.directory.glob("*.json")
-    assert stat.S_IMODE(file.stat().st_mode) == 0o600
-    assert stat.S_IMODE(cache.directory.stat().st_mode) == 0o700
+    if os.name != "nt":  # Windows has no POSIX modes; the folder is the user's own there
+        assert stat.S_IMODE(file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(cache.directory.stat().st_mode) == 0o700
     assert not list(cache.directory.glob(".tmp-*"))
 
 
