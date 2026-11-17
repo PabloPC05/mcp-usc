@@ -16,6 +16,13 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### Editar una entrega que ya está en el límite de archivos
+
+- con la tarea en su máximo de archivos, Moodle esconde «Engadir» hasta que hay sitio, así que
+  sustituir los archivos fallaba; ahora se vacía primero el borrador y luego se sube. Es seguro
+  porque la entrega solo cambia al guardar el formulario: si algo falla antes, sigue como
+  estaba. Probado en vivo editando una entrega de un curso pasado.
+
 ### La nota de cada entrega
 
 - la inspección confirmada de una entrega trae también su corrección: «Cualificación», cuándo y

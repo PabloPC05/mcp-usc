@@ -713,14 +713,31 @@ class MoodleSessionForms:
         manager = await self._get(manager_url, {})
         current_files = self._draft_files(manager, item_id)
         upload_form = await self._discover_upload_form(manager, item_id)
+        mutations = 0
+        if upload_form is None and current_files:
+            # At the file limit Moodle only offers «Engadir» once there is room. Emptying
+            # the draft first is safe: the submission itself only changes when the form is
+            # saved, and an unsaved draft is thrown away the next time the page opens.
+            try:
+                for item in current_files:
+                    mutations += 1
+                    await self._get(item["delete_url"], {})
+                current_files = []
+                manager = await self._get(manager_url, {})
+                upload_form = await self._discover_upload_form(manager, item_id)
+            except Exception:
+                return _partial_draft(
+                    "replace_assignment_files",
+                    "Fallo al vaciar el borrador; la entrega no se guardo y sigue como estaba",
+                )
         if upload_form is None:
             return _diagnostic(
                 "replace_assignment_files",
                 "upload_repository_not_found",
-                "Moodle no expuso un repositorio de subida no-JavaScript seguro",
+                "Moodle no expuso un repositorio de subida no-JavaScript seguro"
+                + ("; la entrega no se guardo y sigue como estaba" if mutations else ""),
             )
 
-        mutations = 0
         try:
             for item in current_files:
                 mutations += 1
