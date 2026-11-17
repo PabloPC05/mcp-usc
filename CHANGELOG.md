@@ -16,6 +16,16 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### El Campus completo, sin cortes
+
+- el Timeline se pide por páginas (Moodle da 50 eventos por llamada): `list_pending_work` y
+  `list_upcoming_events` aceptan hasta 200, y con un filtro de cursos ya no se pierden eventos;
+- las etiquetas de un curso traen su texto («Profesorado: …») en vez del nombre recortado que
+  genera Moodle: se piden todas en una sola llamada AJAX con `core_course_get_module`, que no
+  abre la página del curso ni registra visitas;
+- la sesión HTTP puede agrupar varias llamadas AJAX de solo lectura en una petición
+  (`invoke_many`), porque Moodle atiende una petición por sesión cada vez.
+
 ### Entrar sin volver a teclear la contraseña
 
 - la ventana de `mcp-usc login` recuerda tu cuenta de Microsoft entre logins, como cualquier

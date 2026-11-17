@@ -437,6 +437,28 @@ def _validate_limit(limit: int, maximum: int = 200) -> None:
         raise ValueError(f"limit debe estar entre 1 y {maximum}")
 
 
+async def _paged_action_events(
+    call: Any, start: int, end: int, limit: int
+) -> list[dict[str, Any]]:
+    """The timeline as Moodle pages it: 50 at most per call, continuing after the last id."""
+
+    events: list[dict[str, Any]] = []
+    after = 0
+    while len(events) < limit:
+        size = min(50, limit - len(events))
+        payload = await call(
+            "core_calendar_get_action_events_by_timesort",
+            {"timesortfrom": start, "timesortto": end, "aftereventid": after, "limitnum": size},
+        )
+        page = _extract_list(payload, "events")
+        events.extend(page)
+        last = page[-1].get("id") if page and isinstance(page[-1], Mapping) else None
+        if len(page) < size or not isinstance(last, int) or last == after:
+            break
+        after = last
+    return events[:limit]
+
+
 def _validate_message(recipient_user_id: int, text: str) -> str:
     if (
         isinstance(recipient_user_id, bool)
@@ -840,19 +862,10 @@ class RestMoodleGateway(CampusGateway):
         return [course for course in courses if _course_is_current(course)]
 
     async def action_events(self, start: int, end: int, limit: int) -> list[dict[str, Any]]:
-        _validate_limit(limit, maximum=50)
+        _validate_limit(limit, maximum=200)
         if start < 0 or end <= start:
             raise ValueError("El intervalo de eventos no es válido")
-        payload = await self._call(
-            "core_calendar_get_action_events_by_timesort",
-            {
-                "timesortfrom": start,
-                "timesortto": end,
-                "aftereventid": 0,
-                "limitnum": limit,
-            },
-        )
-        return _extract_list(payload, "events")[:limit]
+        return await _paged_action_events(self._call, start, end, limit)
 
     async def event_by_id(self, event_id: int) -> dict[str, Any]:
         if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
@@ -1119,6 +1132,81 @@ class HttpSessionMoodleGateway(CampusGateway):
             # A cached sesskey belongs to a session Moodle no longer accepts.
             self._forget_session_context(cookie)
             raise
+
+    async def invoke_many(
+        self, function: str, arguments: Sequence[Mapping[str, Any]]
+    ) -> list[Any]:
+        """Several calls of one read-only function in a single AJAX request.
+
+        Moodle serves one request per session at a time, so batching avoids queueing.
+        Each entry is the call's data, or the CampusError it raised.
+        """
+
+        if not arguments:
+            return []
+        if len(arguments) > 50:
+            raise ValueError("No se pueden agrupar mas de 50 llamadas AJAX")
+        cookie = self._session_cookie()
+        try:
+            return await self._ajax_batch(function, arguments)
+        except AuthenticationRequired:
+            # A cached sesskey belongs to a session Moodle no longer accepts.
+            self._forget_session_context(cookie)
+            raise
+
+    async def _ajax_batch(
+        self, function: str, arguments: Sequence[Mapping[str, Any]]
+    ) -> list[Any]:
+        context = await self._session_context()
+        cookie = self._session_cookie()
+        request_payload = [
+            {"index": index, "methodname": function, "args": dict(args)}
+            for index, args in enumerate(arguments)
+        ]
+        try:
+            async with (
+                self._client(cookie) as client,
+                client.stream(
+                    "POST",
+                    self._url(
+                        "lib/ajax/service.php", {"sesskey": context.sesskey, "info": function}
+                    ),
+                    json=request_payload,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                ) as response,
+            ):
+                self._ensure_authenticated_response(response)
+                self._remember_rotated_cookie(response, cookie)
+                content = await _read_limited_response(response, _MAX_JSON_RESPONSE_BYTES)
+                self._ensure_authenticated_response(response, content)
+        except CampusError:
+            raise
+        except httpx.HTTPError:
+            raise CampusError("No se pudo conectar por HTTP con el Campus Virtual.") from None
+        try:
+            envelope = json.loads(content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise CampusProtocolError("Moodle devolvió una respuesta AJAX no válida.") from exc
+        if not isinstance(envelope, list):
+            raise CampusProtocolError("Moodle devolvió una respuesta AJAX inesperada.")
+        results: list[Any] = [
+            CampusProtocolError("Moodle no respondió a esta llamada.") for _ in arguments
+        ]
+        for position, item in enumerate(envelope[: len(arguments)]):
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("error"):
+                error = _moodle_error(item, function)
+                if isinstance(error, AuthenticationRequired):
+                    raise error
+                results[position] = error
+            elif "data" in item:
+                results[position] = item["data"]
+        return results
 
     async def _ajax_once(self, function: str, arguments: Mapping[str, Any]) -> Any:
         context = await self._session_context()
@@ -1526,19 +1614,10 @@ class HttpSessionMoodleGateway(CampusGateway):
         return courses
 
     async def action_events(self, start: int, end: int, limit: int) -> list[dict[str, Any]]:
-        _validate_limit(limit, maximum=50)
+        _validate_limit(limit, maximum=200)
         if start < 0 or end <= start:
             raise ValueError("El intervalo de eventos no es válido")
-        payload = await self._ajax(
-            "core_calendar_get_action_events_by_timesort",
-            {
-                "timesortfrom": start,
-                "timesortto": end,
-                "aftereventid": 0,
-                "limitnum": limit,
-            },
-        )
-        return _extract_list(payload, "events")[:limit]
+        return await _paged_action_events(self._ajax, start, end, limit)
 
     async def event_by_id(self, event_id: int) -> dict[str, Any]:
         if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
