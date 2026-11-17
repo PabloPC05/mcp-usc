@@ -51,12 +51,12 @@ def test_normalise_event_keeps_source_links_and_cleans_description() -> None:
 
 
 async def test_list_events_rejects_values_above_moodle_page_limit() -> None:
-    with pytest.raises(ValueError, match="1 y 50"):
+    with pytest.raises(ValueError, match="1 y 200"):
         await UscService().list_events(
             days=60,
             include_overdue=True,
             course_ids=None,
-            limit=51,
+            limit=201,
         )
 
 
@@ -118,7 +118,7 @@ async def test_course_filter_is_applied_before_the_result_limit() -> None:
     )
 
     assert [item["event_id"] for item in result] == [99]
-    assert gateway.requests[0][2] == 50
+    assert gateway.requests[0][2] == 200
 
 
 async def test_listing_shortens_descriptions_but_keeps_the_marker() -> None:

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from bs4 import BeautifulSoup
+
 from .academic_profile import AcademicProfileError, resolve_academic_context
 from .activity_actions import ActivityActionError
 from .activity_actions import (
@@ -397,6 +399,43 @@ async def _session_form_mutation(action: str, operation: Any) -> dict[str, Any]:
                 "estado mediante el flujo confirmado antes de decidir."
             ),
         }
+
+
+_LABEL_TEXT_CHARS = 2_000
+
+
+async def _fill_label_texts(gateway: Any, items: list[dict[str, Any]]) -> None:
+    """Labels' own text («Profesorado: …»), which the course state does not carry.
+
+    ``core_course_get_module`` renders one activity over AJAX, without opening the course
+    page (so no view is logged); all the labels of the page go in one request.
+    """
+
+    invoke_many = getattr(gateway, "invoke_many", None)
+    labels = [
+        item
+        for item in items
+        if item.get("module_type") == "label" and not item.get("description")
+    ]
+    if invoke_many is None or not labels:
+        return
+    for start in range(0, len(labels), 50):
+        chunk = labels[start : start + 50]
+        try:
+            rendered = await invoke_many(
+                "core_course_get_module", [{"id": int(item["module_id"])} for item in chunk]
+            )
+        except (CampusError, ValueError):
+            return  # the names stay: better a short label than no course page
+        for item, html in zip(chunk, rendered, strict=False):
+            if not isinstance(html, str):
+                continue
+            soup = BeautifulSoup(html, "html.parser")
+            body = soup.select_one(".activity-altcontent") or soup.select_one(".no-overflow")
+            if body is not None:
+                text = html_to_text(str(body), limit=_LABEL_TEXT_CHARS)
+                if text:
+                    item["description"] = text
 
 
 class UscService:
@@ -1159,8 +1198,8 @@ class UscService:
     ) -> list[dict[str, Any]]:
         if days < 1 or days > 366:
             raise ValueError("days debe estar entre 1 y 366")
-        if limit < 1 or limit > 50:
-            raise ValueError("limit debe estar entre 1 y 50")
+        if limit < 1 or limit > 200:
+            raise ValueError("limit debe estar entre 1 y 200")
         now = datetime.now(MADRID)
         if include_overdue:
             # Only this academic year's overdue work: Moodle keeps every never-completed
@@ -1171,8 +1210,8 @@ class UscService:
             start = int(now.timestamp())
         end = int((now + timedelta(days=days)).timestamp())
         wanted = set(course_ids or [])
-        # Moodle applies the limit before our course filter, so ask for a full page.
-        events = await self._campus().action_events(start, end, 50 if wanted else limit)
+        # Moodle applies the limit before our course filter, so ask for every page.
+        events = await self._campus().action_events(start, end, 200 if wanted else limit)
         normalised = [normalise_event(event) for event in events]
         if wanted:
             normalised = [event for event in normalised if event.get("course_id") in wanted]
@@ -1886,12 +1925,14 @@ class UscService:
         gateway = self._campus()
         if _session_form_client(gateway) is not None:
             states = await fetch_session_course_states(gateway, [course_id])
-            return session_course_contents(
+            page = session_course_contents(
                 states,
                 section_id=section_id,
                 offset=offset,
                 limit=limit,
             )
+            await _fill_label_texts(gateway, page.get("items") or [])
+            return page
         result = await moodle_list_course_contents(
             gateway.invoke,
             course_id=course_id,
