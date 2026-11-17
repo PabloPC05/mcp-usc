@@ -16,6 +16,15 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### Entrar sin volver a teclear la contraseña
+
+- la ventana de `mcp-usc login` recuerda tu cuenta de Microsoft entre logins, como cualquier
+  navegador (perfil propio en `USC_BROWSER_PROFILE`, carpeta 0700); la cookie del Campus sigue
+  yendo solo al llavero del sistema;
+- va directa a «Acceder con Microsoft» (`/auth/oidc/`), sin pasar por la página de acceso;
+- nueva `renew_session_silently`: renueva la sesión sin ventana cuando Microsoft aún te recuerda,
+  y se rinde en segundos (sin guardar nada) si te pide algo, para que lo resuelva la ventana.
+
 ### Entregas en el Campus de la USC (Moodle 4)
 
 - el gestor de archivos sin JavaScript se encuentra también cuando Moodle lo enlaza desde

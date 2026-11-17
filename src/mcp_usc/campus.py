@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
@@ -2080,6 +2081,53 @@ def _login_browser_channels(configured: str) -> tuple[str | None, ...]:
     return (configured.strip(),)
 
 
+# Pages where Microsoft is waiting for the person (account, password, MFA, account picker).
+_NEEDS_PERSON = (
+    "input[name='loginfmt']",
+    "input[name='passwd']",
+    "input[type='password']",
+    "input[name='otc']",
+    "#idDiv_SAOTCAS_Title",
+    "#idDiv_SAOTCC_Title",
+    "#tilesHolder",
+)
+
+
+async def _open_login_context(playwright: Any, settings: Settings, *, headless: bool) -> Any:
+    """A browser that remembers your Microsoft account between logins, like any browser.
+
+    Each engine/channel keeps its own profile folder (they are not interchangeable) inside
+    ``USC_BROWSER_PROFILE``; Moodle's own cookie still goes to the system keyring only.
+    """
+
+    root = Path(settings.browser_profile_dir)
+    last_error: Exception | None = None
+    candidates: list[tuple[Any, str | None, str]] = [
+        (playwright.chromium, channel, channel or "chromium")
+        for channel in _login_browser_channels(settings.browser_channel)
+    ]
+    if settings.browser_channel.strip().casefold() in {"", "auto"}:
+        # Engines previously downloaded with `playwright install` also work for the login.
+        candidates += [(playwright.webkit, None, "webkit"), (playwright.firefox, None, "firefox")]
+    for engine, channel, folder in candidates:
+        profile = root / folder
+        options: dict[str, Any] = {"headless": headless}
+        if channel:
+            options["channel"] = channel
+        try:
+            context = await engine.launch_persistent_context(str(profile), **options)
+        except Exception as exc:  # that browser is not installed on this machine
+            last_error = exc
+            continue
+        with suppress(OSError):
+            profile.chmod(0o700)  # Microsoft's remembered sign-in lives here
+        return context
+    raise LoginBrowserUnavailable(
+        "No se encontró un navegador para el login (Chrome, Edge o uno de Playwright). "
+        "Ejecuta `mcp-usc login --install-browser` para descargar uno solo para esto."
+    ) from last_error
+
+
 async def _launch_login_browser(playwright: Any, configured_channel: str) -> Any:
     last_error: Exception | None = None
     for channel in _login_browser_channels(configured_channel):
@@ -2088,7 +2136,6 @@ async def _launch_login_browser(playwright: Any, configured_channel: str) -> Any
         except Exception as exc:  # the channel is not installed on this machine
             last_error = exc
     if configured_channel.strip().casefold() in {"", "auto"}:
-        # Engines previously downloaded with `playwright install` also work for the login.
         for engine in ("webkit", "firefox"):
             try:
                 return await getattr(playwright, engine).launch(headless=False)
@@ -2100,11 +2147,32 @@ async def _launch_login_browser(playwright: Any, configured_channel: str) -> Any
     ) from last_error
 
 
-async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str, Any]:
-    """Open a visible, ephemeral browser solely to bootstrap MoodleSession."""
+async def _waits_for_person(context: Any, campus_host: str | None) -> bool:
+    """True when the open page is a Microsoft step that needs someone to type or choose."""
 
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 30:
-        raise ValueError("timeout debe ser un entero de al menos 30 segundos")
+    for page in context.pages:
+        if urlparse(page.url).hostname == campus_host:
+            continue
+        for selector in _NEEDS_PERSON:
+            with suppress(Exception):
+                if await page.locator(selector).first.is_visible(timeout=200):
+                    return True
+    return False
+
+
+async def _capture_session(
+    settings: Settings,
+    *,
+    headless: bool,
+    timeout: int,
+    give_up_when_asked: bool,
+) -> str:
+    """Opens the Campus's Microsoft sign-in and returns the authenticated MoodleSession.
+
+    Returns "" when time runs out or, with ``give_up_when_asked``, as soon as Microsoft
+    needs a person (the silent renewal then hands over to the visible window).
+    """
+
     base_url = validate_usc_url(settings.moodle_url, campus=True).rstrip("/")
     try:
         from playwright.async_api import async_playwright
@@ -2119,14 +2187,17 @@ async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str,
     # Moodle issues a new MoodleSession when the login completes, so a guest cookie that
     # was already rejected is only re-checked now and then instead of every second.
     rejected_at: dict[str, float] = {}
+    asked = 0
     try:
         async with async_playwright() as playwright:
-            browser = await _launch_login_browser(playwright, settings.browser_channel)
+            context = await _open_login_context(playwright, settings, headless=headless)
             try:
-                context = await browser.new_context()
-                page = await context.new_page()
+                page = context.pages[0] if context.pages else await context.new_page()
+                # Straight to «Acceder con Microsoft»: the login page has only that button.
                 await page.goto(
-                    validate_usc_url(urljoin(f"{base_url}/", "login/index.php"), campus=True),
+                    validate_usc_url(
+                        urljoin(f"{base_url}/", "auth/oidc/?source=loginpage"), campus=True
+                    ),
                     wait_until="domcontentloaded",
                     timeout=min(timeout * 1_000, 120_000),
                 )
@@ -2138,6 +2209,10 @@ async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str,
                     ):
                         # Still on Microsoft's sign-in pages: nothing to check yet (this
                         # avoided ~100 Campus requests during one live MFA login).
+                        if give_up_when_asked and await _waits_for_person(context, campus_host):
+                            asked += 1
+                            if asked >= 2:  # seen twice: not a page in transit
+                                break
                         await asyncio.sleep(1)
                         continue
                     for cookie in await context.cookies([base_url]):
@@ -2157,15 +2232,41 @@ async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str,
                         break
                     await asyncio.sleep(1)
             finally:
-                await browser.close()
+                await context.close()
     except (TimeoutError, CampusError):
         raise
     except Exception as exc:
         raise CampusError("No se pudo completar el login interactivo del Campus Virtual.") from exc
+    return session_cookie
 
+
+async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str, Any]:
+    """A visible browser window for Microsoft + MFA that remembers the account next time."""
+
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 30:
+        raise ValueError("timeout debe ser un entero de al menos 30 segundos")
+    session_cookie = await _capture_session(
+        settings, headless=False, timeout=timeout, give_up_when_asked=False
+    )
     if not session_cookie:
         raise TimeoutError(
             "No se completó el acceso al Campus Virtual dentro del tiempo disponible."
         )
     CredentialStore().set(SESSION_CREDENTIAL_NAME, session_cookie)
     return {"authenticated": True, "method": "moodle_http_session"}
+
+
+async def renew_session_silently(settings: Settings, timeout: int = 45) -> bool:
+    """Renews MoodleSession with no window when the login browser still remembers you.
+
+    False (and nothing stored) when Microsoft asks for anything: then a person has to use
+    :func:`interactive_login`.
+    """
+
+    session_cookie = await _capture_session(
+        settings, headless=True, timeout=timeout, give_up_when_asked=True
+    )
+    if not session_cookie:
+        return False
+    CredentialStore().set(SESSION_CREDENTIAL_NAME, session_cookie)
+    return True
