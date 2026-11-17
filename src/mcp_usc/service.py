@@ -148,7 +148,7 @@ _LIST_DESCRIPTION_CHARS = 400
 # Plan sheets (".../intelixencia-artificial-17632-16883-2-98066") and timetable sessions
 # (".../subject/17632-16883-2-98066") end with the same subject offering id.
 _SUBJECT_OFFERING_ID = re.compile(r"(\d+-\d+-\d+-\d+)/?$")
-_TIMETABLE_CONCURRENCY = 4
+_TIMETABLE_CONCURRENCY = 8
 _SESSION_FIELDS = (
     "date",
     "weekday",
@@ -1431,15 +1431,33 @@ class UscService:
                 except Exception as exc:  # reported per course, never hides the others
                     return exc
 
+        async def settle(key: tuple[str, int], result: Any) -> list[Any]:
+            """Final results of one (degree, course): homonymous plans are tried one by one."""
+
+            if isinstance(result, Exception):
+                return [result]
+            if result.get("status") != "program_selection_required":
+                return [result]
+            options = [option.get("program_id") for option in result.get("program_options", [])]
+            retries = await asyncio.gather(
+                *(timetable(key[0], key[1], pid) for pid in options if pid)
+            )
+            settled = await asyncio.gather(*(settle(key, retry) for retry in retries))
+            return [item for items in settled for item in items]
+
+        async def resolve(key: tuple[str, int]) -> list[Any]:
+            return await settle(key, await timetable(key[0], key[1], None))
+
         groups = list(wanted)
-        results = await asyncio.gather(*(timetable(url, course, None) for url, course in groups))
+        # Groups are independent: resolve them concurrently, then merge in a fixed order.
+        resolved = await asyncio.gather(*(resolve(key) for key in groups))
         sessions: dict[tuple[Any, ...], dict[str, Any]] = {}
         sources: list[dict[str, Any]] = []
         timetable_index: dict[str, int] = {}
         complete_flags: list[bool] = []
         issues: list[dict[str, Any]] = []
 
-        async def collect(key: tuple[str, int], result: Any) -> None:
+        def collect(key: tuple[str, int], result: Any) -> None:
             degree_url, course = key
             if isinstance(result, Exception):
                 issues.append(
@@ -1449,17 +1467,6 @@ class UscService:
                         "message": str(result)[:300],
                     }
                 )
-                return
-            if result.get("status") == "program_selection_required":
-                # Homonymous plans: try each one; exact offering ids keep them apart.
-                options = [
-                    option.get("program_id") for option in result.get("program_options", [])
-                ]
-                retries = await asyncio.gather(
-                    *(timetable(degree_url, course, pid) for pid in options if pid)
-                )
-                for retry in retries:
-                    await collect(key, retry)
                 return
             complete_flags.append(result.get("complete") is not False)
             source_index: dict[str, int] = {}
@@ -1501,8 +1508,9 @@ class UscService:
                 compact["timetable"] = source_index.get(str(session.get("timetable_url") or ""))
                 sessions.setdefault(identity, compact)
 
-        for key, result in zip(groups, results, strict=True):
-            await collect(key, result)
+        for key, finals in zip(groups, resolved, strict=True):
+            for final in finals:
+                collect(key, final)
         ordered = sorted(
             sessions.values(),
             key=lambda item: (
@@ -2132,7 +2140,8 @@ class UscService:
                 "stateful_read": True,
                 "warning": (
                     "La vista previa no abre la tarea. La inspeccion confirmada abrira una vez "
-                    "la pagina de edicion y Moodle puede registrar vista o completion."
+                    "la pagina de edicion y la de la tarea, y Moodle puede registrar vista o "
+                    "completion."
                 ),
                 **confirmation,
             }
@@ -2149,12 +2158,18 @@ class UscService:
         if inspection_result.get("outcome") == "unknown":
             return inspection_result
         inspection = inspection_result
+        # Same confirmed visit: the assignment page's «Estado da entrega» (draft or sent).
+        try:
+            submission_status = await forms.assignment_status(course_module_id)
+        except (CampusError, ValueError):
+            submission_status = None
         return {
             "assignment_id": None,
             "course_module_id": course_module_id,
             "transport": "moodle_http_form",
             "editable": bool(inspection.get("save_supported")),
             "inspection": inspection,
+            "submission_status": submission_status,
             "stateful_inspection_confirmed": True,
             "content_is_untrusted": True,
         }

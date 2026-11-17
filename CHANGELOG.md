@@ -6,6 +6,30 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 
 ## [Sin publicar]
 
+### Horarios y exámenes más rápidos entre procesos
+
+- dónde vive cada código G en los planes de estudio (7 días) y el descubrimiento de horarios
+  (12 h) se guardan en disco entre procesos, en ficheros privados;
+- las variantes de plan homónimas se resuelven en paralelo y no se vuelve a parsear un plan ya
+  validado;
+- en procesos nuevos, `horario` baja de ~60 s a ~6 s y `examenes` de ~30 s a ~2 s;
+- `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
+  `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
+
+### Entregas en el Campus de la USC (Moodle 4)
+
+- el gestor de archivos sin JavaScript se encuentra también cuando Moodle lo enlaza desde
+  `<noscript><object data>`, que es como lo hace cv.usc.es; antes `replace_submission_files` no
+  podía subir nada allí;
+- antes de borrar los archivos del borrador se comprueban `maxfiles` y `maxbytes` de la tarea, así
+  que una subida rechazada ya no deja la entrega vacía; `inspect_submission_status` informa de
+  esos límites;
+- la inspección confirmada de una entrega devuelve también el «Estado da entrega» de la página de
+  la tarea (enviada o borrador, tiempo restante) y si falta «Enviar para cualificar»;
+- `remove_submission` sigue la página de confirmación de Moodle 4 («Confirma que quere retirar a
+  súa entrega?»), que antes no encontraba;
+- probado de verdad en una tarea del curso 2025/2026: entregar un archivo, comprobarlo y retirarlo.
+
 ### Para cualquier grado
 
 - `get_official_exam_dates` y `get_my_official_exam_schedule` funcionan para cualquier grado de la

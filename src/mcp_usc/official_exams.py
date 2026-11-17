@@ -5,18 +5,20 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from .degree_catalog import (
     USC_DEGREE_CATALOG_URL,
     DegreeCatalog,
     DegreeCatalogEntry,
+    DegreeScanIssue,
     DegreeSubjectSearch,
     SubjectDegreeLocation,
     UscDegreeCatalogClient,
     locate_subject_codes,
 )
+from .disk_cache import DiskJsonCache
 from .domain import MADRID
 from .exam_calendar import (
     ExamCalendar,
@@ -32,7 +34,7 @@ from .exam_catalog import (
     normalise_subject_code,
     normalise_subject_title,
 )
-from .public_http_cache import PublicHttpCache, public_cache_summary
+from .public_http_cache import PublicHttpCache, PublicHttpCacheMetadata, public_cache_summary
 from .study_plans import StudyPlan, StudyPlanError, StudyPlanSubject, UscStudyPlanClient
 
 
@@ -641,9 +643,209 @@ _LOCATION_TTL_SECONDS = 6 * 3_600
 _LOCATION_CACHE: dict[tuple[object, ...], tuple[float, StudentSubjectSearch]] = {}
 _LOCATION_CACHE_MAX = 64
 
+# Across processes (every CLI run is a fresh one) the same answer is kept on disk. Where a
+# code lives changes at most once per academic year, so a week is conservative. Disable
+# with USC_LOCATION_CACHE=0; relocate with USC_CACHE_DIR.
+_LOCATION_DISK_TTL_SECONDS = 7 * 86_400
+_LOCATION_DISK_CACHE = DiskJsonCache(
+    "locations", ttl_seconds=_LOCATION_DISK_TTL_SECONDS, env_flag="USC_LOCATION_CACHE"
+)
+
 
 def clear_location_cache() -> None:
     _LOCATION_CACHE.clear()
+
+
+def _entry_to_dict(entry: DegreeCatalogEntry) -> dict[str, Any]:
+    return {
+        "name": entry.name,
+        "url": entry.url,
+        "area_slug": entry.area_slug,
+        "campus": entry.campus,
+    }
+
+
+def _entry_from_dict(data: dict[str, Any]) -> DegreeCatalogEntry:
+    return DegreeCatalogEntry(
+        name=str(data["name"]),
+        url=str(data["url"]),
+        area_slug=str(data["area_slug"]),
+        campus=None if data["campus"] is None else str(data["campus"]),
+    )
+
+
+def _location_to_dict(location: SubjectDegreeLocation) -> dict[str, Any]:
+    subject = location.subject
+    return {
+        "degree": _entry_to_dict(location.degree),
+        "plan_endpoint_url": location.plan_endpoint_url,
+        "subject": {
+            "code": subject.code,
+            "name": subject.name,
+            "sheet_url": subject.sheet_url,
+            "alternate_sheet_urls": list(subject.alternate_sheet_urls),
+            "course_number": subject.course_number,
+            "semester": subject.semester,
+        },
+    }
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("entero esperado")
+    return value
+
+
+def _location_from_dict(data: dict[str, Any]) -> SubjectDegreeLocation:
+    subject = data["subject"]
+    return SubjectDegreeLocation(
+        degree=_entry_from_dict(data["degree"]),
+        plan_endpoint_url=str(data["plan_endpoint_url"]),
+        subject=StudyPlanSubject(
+            code=str(subject["code"]),
+            name=str(subject["name"]),
+            sheet_url=str(subject["sheet_url"]),
+            alternate_sheet_urls=tuple(str(url) for url in subject["alternate_sheet_urls"]),
+            course_number=_optional_int(subject["course_number"]),
+            semester=_optional_int(subject["semester"]),
+        ),
+    )
+
+
+def _metadata_to_dict(item: PublicHttpCacheMetadata) -> dict[str, Any]:
+    return {
+        "requested_url": item.requested_url,
+        "final_url": item.final_url,
+        "fetched_at": item.fetched_at,
+        "validated_at": item.validated_at,
+        "ttl_seconds": item.ttl_seconds,
+        "media_type": item.media_type,
+        "etag": item.etag,
+        "last_modified": item.last_modified,
+    }
+
+
+def _metadata_from_dict(data: dict[str, Any]) -> PublicHttpCacheMetadata:
+    """Evidence of the original download, now served from the local disk cache."""
+
+    validated_at = str(data["validated_at"])
+    age = max(0.0, (datetime.now(UTC) - datetime.fromisoformat(validated_at)).total_seconds())
+    return PublicHttpCacheMetadata(
+        status="fresh",
+        requested_url=str(data["requested_url"]),
+        final_url=str(data["final_url"]),
+        cache_hit=True,
+        fetched_at=str(data["fetched_at"]),
+        validated_at=validated_at,
+        age_seconds=age,
+        ttl_seconds=float(data["ttl_seconds"]),
+        media_type=str(data["media_type"]),
+        etag=None if data["etag"] is None else str(data["etag"]),
+        last_modified=None if data["last_modified"] is None else str(data["last_modified"]),
+    )
+
+
+def _issue_to_dict(issue: DegreeScanIssue) -> dict[str, Any]:
+    return {
+        "degree": _entry_to_dict(issue.degree),
+        "category": issue.category,
+        "message": issue.message,
+        "affects_completeness": issue.affects_completeness,
+    }
+
+
+def _issue_from_dict(data: dict[str, Any]) -> DegreeScanIssue:
+    return DegreeScanIssue(
+        degree=_entry_from_dict(data["degree"]),
+        category=data["category"],
+        message=str(data["message"]),
+        affects_completeness=bool(data["affects_completeness"]),
+    )
+
+
+def _degree_search_to_dict(search: DegreeSubjectSearch) -> dict[str, Any]:
+    return {
+        "academic_year": search.academic_year,
+        "source_url": search.source_url,
+        "requested_codes": list(search.requested_codes),
+        "locations": [_location_to_dict(item) for item in search.locations],
+        "degree_issues": [_issue_to_dict(item) for item in search.degree_issues],
+        "scanned_degrees": search.scanned_degrees,
+        "catalog_degrees": search.catalog_degrees,
+        "total_catalog_degrees": search.total_catalog_degrees,
+        "selected_area_slugs": list(search.selected_area_slugs),
+        "selected_degree_urls": list(search.selected_degree_urls),
+        "cache_metadata": [_metadata_to_dict(item) for item in search.cache_metadata],
+        "fetched_at": search.fetched_at,
+    }
+
+
+def _degree_search_from_dict(data: dict[str, Any]) -> DegreeSubjectSearch:
+    return DegreeSubjectSearch(
+        academic_year=str(data["academic_year"]),
+        source_url=str(data["source_url"]),
+        requested_codes=tuple(str(code) for code in data["requested_codes"]),
+        locations=tuple(_location_from_dict(item) for item in data["locations"]),
+        degree_issues=tuple(_issue_from_dict(item) for item in data["degree_issues"]),
+        scanned_degrees=int(data["scanned_degrees"]),
+        catalog_degrees=int(data["catalog_degrees"]),
+        total_catalog_degrees=int(data["total_catalog_degrees"]),
+        selected_area_slugs=tuple(str(slug) for slug in data["selected_area_slugs"]),
+        selected_degree_urls=tuple(str(url) for url in data["selected_degree_urls"]),
+        cache_metadata=tuple(_metadata_from_dict(item) for item in data["cache_metadata"]),
+        fetched_at=str(data["fetched_at"]),
+    )
+
+
+def _student_search_to_dict(result: StudentSubjectSearch) -> dict[str, Any]:
+    return {
+        "locations": [_location_to_dict(item) for item in result.locations],
+        "searches": [_degree_search_to_dict(item) for item in result.searches],
+        "scope": list(result.scope),
+        "ignored_scope": list(result.ignored_scope),
+        "widened": result.widened,
+        "previous_plan_searches": [
+            _degree_search_to_dict(item) for item in result.previous_plan_searches
+        ],
+    }
+
+
+def _student_search_from_dict(data: dict[str, Any]) -> StudentSubjectSearch:
+    if not isinstance(data["widened"], bool):
+        raise TypeError("booleano esperado")
+    return StudentSubjectSearch(
+        locations=tuple(_location_from_dict(item) for item in data["locations"]),
+        searches=tuple(_degree_search_from_dict(item) for item in data["searches"]),
+        scope=tuple(str(url) for url in data["scope"]),
+        ignored_scope=tuple(str(url) for url in data["ignored_scope"]),
+        widened=data["widened"],
+        previous_plan_searches=tuple(
+            _degree_search_from_dict(item) for item in data["previous_plan_searches"]
+        ),
+    )
+
+
+def _load_persisted_search(key: list[object]) -> StudentSubjectSearch | None:
+    payload = _LOCATION_DISK_CACHE.load(key)
+    if payload is None:
+        return None
+    try:
+        return _student_search_from_dict(payload)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _persist_search(key: list[object], result: StudentSubjectSearch) -> None:
+    """Keep only clean results: every search finished without errors and nothing stale."""
+
+    every_search = (*result.searches, *result.previous_plan_searches)
+    if not all(search.complete for search in result.searches) or any(
+        item.status == "degraded" for search in every_search for item in search.cache_metadata
+    ):
+        return
+    _LOCATION_DISK_CACHE.store(key, _student_search_to_dict(result))
 
 
 async def locate_student_subjects(
@@ -667,11 +869,23 @@ async def locate_student_subjects(
     # Where a code lives changes at most once per academic year; probing phased-out plan
     # pages (mostly 404) on every call cost seconds. Injected clients (tests) bypass this.
     memo_key: tuple[object, ...] | None = None
+    disk_key: list[object] = []
     if catalog_client is None and study_plan_client is None:
         memo_key = (academic_year, tuple(codes), tuple(degree_urls or ()), widen_to_catalog)
         memo = _LOCATION_CACHE.get(memo_key)
         if memo is not None and memo[0] > time.monotonic():
             return memo[1]
+        disk_key = [
+            USC_DEGREE_CATALOG_URL,
+            academic_year,
+            list(codes),
+            list(degree_urls or ()),
+            widen_to_catalog,
+        ]
+        persisted = _load_persisted_search(disk_key)
+        if persisted is not None:
+            _remember_location(memo_key, persisted)
+            return persisted
     catalog_client = catalog_client or UscDegreeCatalogClient(timeout=timeout, cache=cache)
     plan_client = study_plan_client or UscStudyPlanClient(timeout=timeout, cache=cache)
     catalog = await catalog_client.fetch_catalog(USC_DEGREE_CATALOG_URL)
@@ -733,10 +947,15 @@ async def locate_student_subjects(
         previous_plan_searches=tuple(previous),
     )
     if memo_key is not None and result.complete:
-        while len(_LOCATION_CACHE) >= _LOCATION_CACHE_MAX:
-            _LOCATION_CACHE.pop(next(iter(_LOCATION_CACHE)))
-        _LOCATION_CACHE[memo_key] = (time.monotonic() + _LOCATION_TTL_SECONDS, result)
+        _remember_location(memo_key, result)
+        _persist_search(disk_key, result)
     return result
+
+
+def _remember_location(memo_key: tuple[object, ...], result: StudentSubjectSearch) -> None:
+    while len(_LOCATION_CACHE) >= _LOCATION_CACHE_MAX:
+        _LOCATION_CACHE.pop(next(iter(_LOCATION_CACHE)))
+    _LOCATION_CACHE[memo_key] = (time.monotonic() + _LOCATION_TTL_SECONDS, result)
 
 
 def _location_candidate(location: SubjectDegreeLocation) -> dict[str, Any]:
