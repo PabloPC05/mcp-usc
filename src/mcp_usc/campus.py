@@ -2259,9 +2259,9 @@ async def _capture_session(
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
-        raise CampusError(
-            "El login interactivo requiere el extra `browser-auth`: "
-            "ejecuta `uv sync --extra browser-auth`."
+        raise LoginBrowserUnavailable(
+            "No hay Chrome, Edge, Brave ni Chromium para la ventana de entrar, y tampoco el "
+            "navegador incluido (extra `browser-auth`)."
         ) from exc
 
     deadline = time.monotonic() + timeout
@@ -2322,12 +2322,38 @@ async def _capture_session(
     return session_cookie
 
 
+async def _capture_with_any_browser(
+    settings: Settings, *, headless: bool, timeout: int, give_up_when_asked: bool
+) -> str:
+    """Your own Chrome/Edge/Brave/Chromium when there is one (nothing to download);
+    otherwise Playwright's browsers, if that extra is installed."""
+
+    from .system_browser import SystemBrowserError, find_browser
+    from .system_browser import capture_session as with_your_browser
+
+    browser = find_browser()
+    if browser is not None and settings.browser_channel.strip().casefold() in {"", "auto"}:
+        try:
+            return await with_your_browser(
+                settings,
+                headless=headless,
+                timeout=timeout,
+                give_up_after=20 if give_up_when_asked else None,
+                browser=browser,
+            )
+        except SystemBrowserError as exc:
+            raise CampusError(str(exc)) from exc
+    return await _capture_session(
+        settings, headless=headless, timeout=timeout, give_up_when_asked=give_up_when_asked
+    )
+
+
 async def interactive_login(settings: Settings, timeout: int = 900) -> dict[str, Any]:
     """A visible browser window for Microsoft + MFA that remembers the account next time."""
 
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 30:
         raise ValueError("timeout debe ser un entero de al menos 30 segundos")
-    session_cookie = await _capture_session(
+    session_cookie = await _capture_with_any_browser(
         settings, headless=False, timeout=timeout, give_up_when_asked=False
     )
     if not session_cookie:
@@ -2345,7 +2371,7 @@ async def renew_session_silently(settings: Settings, timeout: int = 45) -> bool:
     :func:`interactive_login`.
     """
 
-    session_cookie = await _capture_session(
+    session_cookie = await _capture_with_any_browser(
         settings, headless=True, timeout=timeout, give_up_when_asked=True
     )
     if not session_cookie:

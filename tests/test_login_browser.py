@@ -103,6 +103,15 @@ async def test_microsoft_asking_for_the_account_needs_a_person():
     assert await campus._waits_for_person(on_campus, "cv.usc.es") is False
 
 
+@pytest.fixture(autouse=True)
+def _no_system_browser(monkeypatch):
+    """These tests are about the Playwright path: no real Chrome of the machine is used."""
+
+    from mcp_usc import system_browser
+
+    monkeypatch.setattr(system_browser, "find_browser", lambda: None)
+
+
 async def test_silent_renewal_stores_only_an_authenticated_session(tmp_path, monkeypatch):
     stored: list[tuple[str, str]] = []
 
