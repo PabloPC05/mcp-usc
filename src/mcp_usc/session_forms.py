@@ -148,6 +148,20 @@ def _performed(operation: str, response: FormResponse) -> dict[str, Any]:
     }
 
 
+def _manager_limits(manager_url: str) -> dict[str, int | None]:
+    """``maxfiles``/``maxbytes`` the assignment set, from the file manager link (None: no limit)."""
+
+    query = parse_qs(urlparse(manager_url).query)
+    limits: dict[str, int | None] = {}
+    for name, key in (("maxfiles", "max_files"), ("maxbytes", "max_bytes")):
+        try:
+            value = int((query.get(name) or [""])[0])
+        except ValueError:
+            value = 0
+        limits[key] = value if value > 0 else None
+    return limits
+
+
 def _partial_draft(operation: str, message: str) -> dict[str, Any]:
     """Conservative result after one or more draft-area mutations."""
 
@@ -373,11 +387,14 @@ class MoodleSessionForms:
     ) -> list[str]:
         links: list[str] = []
         soup = BeautifulSoup(response.text, "html.parser")
-        for anchor in soup.select("a[href]")[:500]:
+        # Moodle 4 embeds the non-JavaScript file manager as <object data> inside <noscript>.
+        targets = [
+            str(element.get("href") or element.get("data") or element.get("src") or "")
+            for element in soup.select("a[href], object[data], iframe[src]")[:500]
+        ]
+        for target in targets:
             try:
-                candidate = self._safe_action(
-                    str(anchor.get("href") or ""), response.url, frozenset({path})
-                )
+                candidate = self._safe_action(target, response.url, frozenset({path}))
             except SessionFormValidationError:
                 continue
             query = parse_qs(urlparse(candidate).query)
@@ -556,6 +573,7 @@ class MoodleSessionForms:
             filemanager = {
                 "supported": True,
                 "draft_item_id_present": True,
+                **_manager_limits(manager_url),
                 "current_files": [
                     {"filename": item["filename"], "filepath": item["filepath"]}
                     for item in current_files
@@ -572,6 +590,39 @@ class MoodleSessionForms:
             "page_text": html_to_text(response.text, limit=4_000),
             "content_is_untrusted": True,
             "security_note": SECURITY_NOTE,
+        }
+
+    async def assignment_status(self, course_module_id: int) -> dict[str, Any]:
+        """The «Estado da entrega» table of the assignment page, as label → value.
+
+        Also says whether Moodle offers the final «Enviar para cualificar» step, which
+        assignments with drafts need before the teacher sees the submission.
+        """
+
+        course_module_id = _positive_id(course_module_id, "course_module_id")
+        response = await self._get(f"{self.base_url}{_ASSIGN_PATH}", {"id": course_module_id})
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows: dict[str, str] = {}
+        table = soup.select_one(".submissionstatustable")
+        for row in (table.select("tr") if table else [])[:30]:
+            header, value = row.find("th"), row.find("td")
+            if header is None or value is None:
+                continue
+            label = " ".join(header.get_text(" ", strip=True).split())[:80]
+            text = " ".join(value.get_text(" ", strip=True).split())[:300]
+            # The comments row is a client-side template («___picture___ ___name___»).
+            if label and text and label not in rows and "___" not in text:
+                rows[label] = text
+        submit_step = any(
+            form.defaults.get("action") == "submit"
+            for form in self._forms(response, frozenset({_ASSIGN_PATH}))
+        )
+        return {
+            "operation": "assignment_status",
+            "course_module_id": course_module_id,
+            "rows": rows,
+            "submit_for_grading_available": submit_step,
+            "content_is_untrusted": True,
         }
 
     async def replace_assignment_files(
@@ -604,6 +655,22 @@ class MoodleSessionForms:
                 "Moodle no expuso el gestor no-JavaScript ligado a este borrador",
             )
         save_form, item_id, manager_url = context
+        # Checked before deleting anything: a refused upload must not leave the draft empty.
+        limits = _manager_limits(manager_url)
+        if limits["max_files"] is not None and len(uploads) > limits["max_files"]:
+            return _diagnostic(
+                "replace_assignment_files",
+                "too_many_files",
+                f"La tarea admite como maximo {limits['max_files']} archivo(s)",
+            )
+        if limits["max_bytes"] is not None and any(
+            len(upload.content) > limits["max_bytes"] for upload in uploads
+        ):
+            return _diagnostic(
+                "replace_assignment_files",
+                "file_too_large",
+                f"La tarea admite archivos de como maximo {limits['max_bytes']} bytes",
+            )
         manager = await self._get(manager_url, {})
         current_files = self._draft_files(manager, item_id)
         upload_form = await self._discover_upload_form(manager, item_id)
@@ -894,13 +961,43 @@ class MoodleSessionForms:
         _confirmed(confirmed, "Eliminar la entrega")
         response = await self._get(f"{self.base_url}{_ASSIGN_PATH}", {"id": course_module_id})
         delete_url = self._assignment_delete_url(response, course_module_id)
-        if not delete_url:
+        if delete_url:
+            return _performed("delete_assignment", await self._get(delete_url, {}))
+        # Moodle 4: «Eliminar entrega» opens a confirmation page whose form posts the removal.
+        offered = any(
+            form.defaults.get("action") == "removesubmissionconfirm"
+            and form.defaults.get("id") == str(course_module_id)
+            for form in self._forms(response, frozenset({_ASSIGN_PATH}))
+        )
+        if not offered:
             return _diagnostic(
                 "delete_assignment",
                 "delete_action_not_found",
                 "Moodle no expuso una accion de borrado ligada a esta entrega",
             )
-        return _performed("delete_assignment", await self._get(delete_url, {}))
+        confirm = await self._get(
+            f"{self.base_url}{_ASSIGN_PATH}",
+            {"id": course_module_id, "action": "removesubmissionconfirm"},
+        )
+        form = next(
+            (
+                candidate
+                for candidate in self._forms(confirm, frozenset({_ASSIGN_PATH}))
+                if candidate.method == "post"
+                and candidate.defaults.get("action") == "removesubmission"
+                and candidate.defaults.get("id") == str(course_module_id)
+                and self._has_sesskey(candidate)
+            ),
+            None,
+        )
+        payload, error = self._payload(form, {}) if form is not None else (None, None)
+        if form is None or error or payload is None:
+            return _diagnostic(
+                "delete_assignment",
+                "delete_confirmation_not_found",
+                error or "Moodle no expuso el formulario que confirma el borrado",
+            )
+        return _performed("delete_assignment", await self._post(form.action, payload))
 
     async def inspect_quiz_start(self, course_module_id: int) -> dict[str, Any]:
         course_module_id = _positive_id(course_module_id, "course_module_id")

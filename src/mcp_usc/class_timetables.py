@@ -13,7 +13,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup, Tag
 
 from . import USER_AGENT
 from .academic_profile import madrid_today
+from .disk_cache import DiskJsonCache
 from .exam_catalog import normalise_academic_year
 from .public_http_cache import (
     DEFAULT_PUBLIC_HTTP_CACHE,
@@ -831,6 +832,38 @@ def _validated_groups(values: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(result)
 
 
+# Which timetables a degree's centres publish for a course (three hops of index pages) changes
+# a few times per semester at most, yet costs ~2 s of latency in every fresh CLI process.
+# Kept on disk for half a day; only complete, non-degraded discoveries are stored. Disable
+# with USC_TIMETABLE_DISCOVERY_CACHE=0; injected transports (tests) never touch the disk.
+_DISCOVERY_DISK_CACHE = DiskJsonCache(
+    "timetable-discovery", ttl_seconds=12 * 3_600, env_flag="USC_TIMETABLE_DISCOVERY_CACHE"
+)
+
+
+def _discovery_from_disk(payload: object) -> dict[str, object] | None:
+    """A stored discovery, with its cache summary rewritten as a local-cache hit."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("timetables"), list):
+        return None
+    cache = payload.get("cache")
+    if not isinstance(cache, dict) or not isinstance(cache.get("resource_count"), int):
+        return None
+    try:
+        validated = datetime.fromisoformat(str(cache["validated_at"]))
+    except ValueError:
+        return None
+    count = cache["resource_count"]
+    cache.update(
+        status="fresh",
+        hit=True,
+        hit_count=count,
+        status_counts={"fresh": count, "revalidated": 0, "degraded": 0},
+        age_seconds=round(max(0.0, (datetime.now(UTC) - validated).total_seconds()), 3),
+    )
+    return payload
+
+
 class UscClassTimetableClient:
     """Cliente anónimo y exclusivamente GET para los horarios lectivos USC."""
 
@@ -872,6 +905,7 @@ class UscClassTimetableClient:
         self.cache = cache
         # Injectable clock (Europe/Madrid date) used to pick the default week.
         self._today = today or madrid_today
+        self._persist_discovery = transport is None
         self._fetcher = SafePublicHttpFetcher(
             timeout=timeout,
             max_bytes=max_bytes,
@@ -941,6 +975,26 @@ class UscClassTimetableClient:
         """Descubre los horarios que los centros enlazan para una titulación."""
 
         course_number = _validated_course_number(course_number)
+        if not self._persist_discovery:
+            return await self._discover_degree_timetables(degree_url, course_number)
+        key = [degree_url, course_number]
+        stored = _discovery_from_disk(_DISCOVERY_DISK_CACHE.load(key))
+        if stored is not None:
+            return stored
+        result = await self._discover_degree_timetables(degree_url, course_number)
+        cache = result.get("cache")
+        if (
+            result["complete"]
+            and isinstance(cache, dict)
+            and cache.get("status") != "degraded"
+            and not result["issues"]
+        ):
+            _DISCOVERY_DISK_CACHE.store(key, result)
+        return result
+
+    async def _discover_degree_timetables(
+        self, degree_url: str, course_number: int | None
+    ) -> dict[str, object]:
 
         def validate_degree(content: bytes) -> None:
             parse_degree_page_html(content.decode("utf-8", errors="replace"), degree_url)

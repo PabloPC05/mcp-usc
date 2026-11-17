@@ -8,6 +8,7 @@ rechaza HTML que no tenga la forma conocida del componente Drupal.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Callable
@@ -194,7 +195,7 @@ def _validated_ajax_or_page(url: str) -> Literal["page", "ajax"]:
     raise UnsafeUrlError("La URL no es una página o endpoint oficial de plan USC")
 
 
-def discover_study_plan_endpoint(
+def _discover_study_plan_endpoint(
     canonical_html: str, canonical_url: str, academic_year: str
 ) -> str:
     """Return the single endpoint link labelled with ``academic_year``.
@@ -260,6 +261,37 @@ def discover_study_plan_endpoint(
             f"{len(candidates)}"
         )
     return endpoint
+
+
+# A fetched page is validated by the HTTP layer and then parsed again by the caller; building
+# the same BeautifulSoup tree twice dominated a cold crawl of the whole catalogue. Both
+# functions are pure in their arguments, so the outcome (value or error) is memoised.
+_PARSE_MEMO_SIZE = 32
+
+
+@functools.lru_cache(maxsize=_PARSE_MEMO_SIZE)
+def _discover_outcome(
+    canonical_html: str, canonical_url: str, academic_year: str
+) -> str | Exception:
+    try:
+        return _discover_study_plan_endpoint(canonical_html, canonical_url, academic_year)
+    except Exception as exc:
+        return exc.with_traceback(None)
+
+
+def discover_study_plan_endpoint(
+    canonical_html: str, canonical_url: str, academic_year: str
+) -> str:
+    """Return the single endpoint link labelled with ``academic_year``.
+
+    The label and endpoint are both checked.  In particular, a matching label
+    pointing off-site is an error rather than a candidate to be ignored.
+    """
+
+    outcome = _discover_outcome(canonical_html, canonical_url, academic_year)
+    if isinstance(outcome, Exception):
+        raise outcome.with_traceback(None)
+    return outcome
 
 
 # Short alias used by callers that do not distinguish discovery from parsing.
@@ -369,6 +401,16 @@ def _plan_semester(spec_cells: list[Tag]) -> int | None:
 
 def parse_study_plan_html(
     plan_html: str, source_url: str, *, academic_year: str | None = None
+) -> tuple[StudyPlanSubject, ...]:
+    """Parse USC's ``h3.at-title`` + adjacent ``ul.academic-subject-specs-list`` (memoised;
+    the result is an immutable tuple of frozen dataclasses)."""
+
+    return _parse_study_plan_html(plan_html, source_url, academic_year)
+
+
+@functools.lru_cache(maxsize=_PARSE_MEMO_SIZE)
+def _parse_study_plan_html(
+    plan_html: str, source_url: str, academic_year: str | None
 ) -> tuple[StudyPlanSubject, ...]:
     """Parse USC's ``h3.at-title`` + adjacent ``ul.academic-subject-specs-list``.
 

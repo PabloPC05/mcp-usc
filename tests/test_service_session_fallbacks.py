@@ -29,6 +29,10 @@ class FakeSessionForms:
             "save_supported": True,
         }
 
+    async def assignment_status(self, course_module_id: int) -> dict[str, Any]:
+        self.calls.append(("assignment_status", (course_module_id,)))
+        return {"rows": {"Estado da entrega": "Borrador (non enviado)"}}
+
     async def save_assignment(
         self,
         course_module_id: int,
@@ -319,7 +323,8 @@ async def test_assignment_stateful_inspection_requires_fresh_confirmation() -> N
     result = await service.inspect_submission_status(17, preview["confirmation_token"])
 
     assert result["stateful_inspection_confirmed"] is True
-    assert gateway.forms.calls == [("inspect_assignment", (17,))]
+    assert gateway.forms.calls == [("inspect_assignment", (17,)), ("assignment_status", (17,))]
+    assert result["submission_status"]["rows"]["Estado da entrega"] == "Borrador (non enviado)"
 
 
 async def test_session_list_assignments_uses_ajax_course_state_and_exposes_only_cmid() -> None:

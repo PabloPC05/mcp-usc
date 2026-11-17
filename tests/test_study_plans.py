@@ -353,3 +353,46 @@ def test_plan_without_course_headers_leaves_the_course_unknown() -> None:
     [subject] = parse_study_plan_html(html, ENDPOINT)
 
     assert subject.course_number is None
+
+
+def test_parsing_is_memoised_so_a_validated_page_is_not_parsed_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_usc import study_plans
+
+    builds = 0
+    original = study_plans.BeautifulSoup
+
+    def counting(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(study_plans, "BeautifulSoup", counting)
+    plan = PLAN_HTML.replace("Álxebra", "Álxebra memoizada")
+    first = parse_study_plan_html(plan, ENDPOINT, academic_year="2025/2026")
+    second = parse_study_plan_html(plan, ENDPOINT, academic_year="2025/2026")
+    assert first == second and builds == 1
+    parse_study_plan_html(plan, ENDPOINT)  # another academic_year argument is another entry
+    assert builds == 2
+
+    page = (
+        "<h1>Memo</h1>"
+        f'<a href="{ENDPOINT}">Curso 2025/2026</a>'
+        '<a href="/gl/course/76/study-plan-by-course/20873">Curso 2024/2025</a>'
+    )
+    before = builds
+    for _ in range(2):
+        assert discover_study_plan_endpoint(page, CANONICAL, "2025/2026") == ENDPOINT
+    assert builds == before + 1
+
+
+def test_memoised_discovery_failures_are_raised_every_time() -> None:
+    page = f'<h1>Otro</h1><a href="{ENDPOINT}">Curso 2025/2026</a>'
+    errors = []
+    for _ in range(3):
+        with pytest.raises(StudyPlanAcademicYearUnavailable) as caught:
+            discover_study_plan_endpoint(page, CANONICAL, "2031/2032")
+        errors.append(caught.value)
+    assert errors[0] is errors[1]
+    assert errors[0].__traceback__ is not None  # re-raising keeps a fresh traceback

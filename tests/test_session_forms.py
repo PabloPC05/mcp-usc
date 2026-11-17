@@ -234,6 +234,145 @@ async def test_replace_assignment_files_uses_server_discovered_non_js_draft_flow
     assert http.post_calls[0][1]["files_filemanager"] == "88"
 
 
+async def test_file_manager_embedded_as_noscript_object_is_found() -> None:
+    """Moodle 4 (cv.usc.es) only links the non-JS manager from <noscript><object data>."""
+
+    form = _filemanager_assignment_form().replace(
+        '<a href="/repository/draftfiles_manager.php?action=browse&amp;itemid=88&amp;'
+        'sesskey=abc123">Gestionar archivos</a>',
+        '<noscript><div><object type="text/html" data="/repository/draftfiles_manager.php?'
+        'env=filemanager&amp;action=browse&amp;itemid=88&amp;sesskey=abc123"></object>'
+        "</div></noscript>",
+    )
+    assert "<object" in form and "<a href" not in form
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", form),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", _draft_manager()),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_plugins()),
+            FormResponse(f"{BASE}/repository/filepicker.php", _repository_upload_form()),
+            FormResponse(
+                f"{BASE}/repository/draftfiles_manager.php", _draft_manager(with_file=False)
+            ),
+        ]
+    )
+
+    result = await http.client().replace_assignment_files(
+        17,
+        [FormUpload("answer.txt", b"confirmed bytes", "text/plain")],
+        confirmed=True,
+    )
+
+    assert result["request_sent"] is True
+    assert len(http.multipart_calls) == 1
+    assert http.post_calls[0][1]["files_filemanager"] == "88"
+
+
+async def test_replace_refuses_more_files_than_allowed_before_touching_the_draft() -> None:
+    form = _filemanager_assignment_form().replace("itemid=88&amp;", "itemid=88&amp;maxfiles=1&amp;")
+    http = FakeHttp([FormResponse(f"{BASE}/mod/assign/view.php?id=17", form)])
+
+    result = await http.client().replace_assignment_files(
+        17,
+        [
+            FormUpload("a.txt", b"a", "text/plain"),
+            FormUpload("b.txt", b"b", "text/plain"),
+        ],
+        confirmed=True,
+    )
+
+    assert result["diagnostic"]["code"] == "too_many_files"
+    assert len(http.get_calls) == 1  # only the edit page: nothing deleted
+    assert http.multipart_calls == [] and http.post_calls == []
+
+
+async def test_inspect_reports_the_file_limits() -> None:
+    form = _filemanager_assignment_form().replace(
+        "itemid=88&amp;", "itemid=88&amp;maxfiles=1&amp;maxbytes=1024&amp;"
+    )
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", form),
+            FormResponse(f"{BASE}/repository/draftfiles_manager.php", _draft_manager()),
+        ]
+    )
+
+    result = await http.client().inspect_assignment(17)
+
+    assert result["filemanager"]["max_files"] == 1
+    assert result["filemanager"]["max_bytes"] == 1024
+    assert result["filemanager"]["current_files"] == [{"filename": "old.txt", "filepath": "/"}]
+
+
+async def test_assignment_status_reads_the_status_table_and_the_submit_step() -> None:
+    page = """
+    <div class="submissionstatustable"><table class="generaltable">
+      <tr><th>Estado da entrega</th><td>Borrador (non enviado)</td></tr>
+      <tr><th>Tempo restante</th><td>A tarefa está atrasada por: 284 días</td></tr>
+      <tr><th>Comentarios a entrega</th><td>___picture___ ___name___</td></tr>
+    </table></div>
+    <form method="post" action="/mod/assign/view.php">
+      <input type="hidden" name="id" value="17"><input type="hidden" name="action" value="submit">
+      <input type="hidden" name="sesskey" value="abc123">
+    </form>
+    """
+    http = FakeHttp([FormResponse(f"{BASE}/mod/assign/view.php?id=17", page)])
+
+    result = await http.client().assignment_status(17)
+
+    assert result["rows"] == {
+        "Estado da entrega": "Borrador (non enviado)",
+        "Tempo restante": "A tarefa está atrasada por: 284 días",
+    }
+    assert result["submit_for_grading_available"] is True
+    assert http.post_calls == []
+
+
+async def test_delete_assignment_follows_moodle4_confirmation_page() -> None:
+    view = """
+    <form method="get" action="/mod/assign/view.php">
+      <input type="hidden" name="id" value="17">
+      <input type="hidden" name="action" value="removesubmissionconfirm">
+      <button type="submit">Eliminar entrega</button>
+    </form>
+    """
+    confirm = """
+    <form method="get" action="/mod/assign/view.php">
+      <input type="hidden" name="id" value="17"><input type="hidden" name="action" value="view">
+    </form>
+    <form method="post" action="/mod/assign/view.php">
+      <input type="hidden" name="id" value="17">
+      <input type="hidden" name="action" value="removesubmission">
+      <input type="hidden" name="sesskey" value="abc123">
+      <input type="hidden" name="userid" value="5">
+      <button type="submit">Continuar</button>
+    </form>
+    """
+    http = FakeHttp(
+        [
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", view),
+            FormResponse(f"{BASE}/mod/assign/view.php?id=17", confirm),
+        ]
+    )
+
+    result = await http.client().delete_assignment(17, confirmed=True)
+
+    assert result["request_sent"] is True
+    assert http.get_calls[1][1] == {"id": 17, "action": "removesubmissionconfirm"}
+    assert len(http.post_calls) == 1
+    posted = http.post_calls[0][1]
+    assert posted["action"] == "removesubmission" and posted["sesskey"] == "abc123"
+
+
+async def test_delete_assignment_without_the_button_touches_nothing() -> None:
+    http = FakeHttp([FormResponse(f"{BASE}/mod/assign/view.php?id=17", "<p>Sen entrega</p>")])
+
+    result = await http.client().delete_assignment(17, confirmed=True)
+
+    assert result["diagnostic"]["code"] == "delete_action_not_found"
+    assert len(http.get_calls) == 1 and http.post_calls == []
+
+
 async def test_delete_assignment_files_requires_confirmation_before_page_view() -> None:
     http = FakeHttp([])
 

@@ -76,6 +76,12 @@ Con la sesión de alumno, Moodle solo entrega un archivo cuando se abre su activ
 por eso pregunta antes (o `--si`). Lo ya descargado no se vuelve a abrir. `USC_DOWNLOAD_ROOT`
 cambia la carpeta por defecto y `--carpeta` la de una descarga concreta.
 
+Lo lento de horarios y exámenes (localizar tus asignaturas en los planes de estudio) se guarda
+en disco entre procesos: dónde vive cada código G, 7 días, y el descubrimiento de horarios, 12 h.
+Así `horario` pasa de ~60 s a ~6 s y `examenes` de ~30 s a ~2 s a partir de la segunda vez.
+`USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
+`USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
+
 ## Qué puedes pedirle
 
 | Necesidad | Ejemplo de petición |
