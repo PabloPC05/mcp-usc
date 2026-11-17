@@ -7,6 +7,7 @@ Neither the cookie nor Moodle's sesskey are returned to callers.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
@@ -218,6 +219,47 @@ async def import_session_cookie(
         site_name=_first_text(soup, ".navbar-brand", ".site-name", "title"),
     )
     return imported.as_dict()
+
+
+async def end_campus_session(
+    settings: Settings, *, credential_store: CredentialStore | None = None
+) -> dict[str, object]:
+    """Log out of the Campus itself (the cookie stops working anywhere) and forget it here."""
+
+    store = credential_store or CredentialStore()
+    try:
+        cookie = store.get(SESSION_CREDENTIAL_NAME)
+    except Exception:
+        cookie = None
+    remote: bool | None = None
+    if cookie:
+        base = validate_usc_url(settings.moodle_url, campus=True).rstrip("/")
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.request_timeout_seconds,
+                follow_redirects=False,
+                cookies={"MoodleSession": cookie},
+                headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+            ) as client:
+                page = await client.get(f"{base}/user/preferences.php")
+                if page.is_redirect or page.status_code >= 400:
+                    remote = False  # already over on the Campus
+                else:
+                    soup = BeautifulSoup(page.text, "html.parser")
+                    sesskey = _sesskey(soup, page.text)
+                    answer = await client.get(
+                        f"{base}/login/logout.php", params={"sesskey": sesskey}
+                    )
+                    remote = answer.status_code < 400
+        except (httpx.HTTPError, SessionImportError, ValueError):
+            remote = None  # could not tell; the local copy is forgotten anyway
+    forget_session_cookie(credential_store=store)
+    return {
+        "authenticated": False,
+        "local_session_removed": True,
+        "remote_logout": remote,
+        "environment_session_kept": bool(os.getenv("USC_MOODLE_SESSION", "").strip()),
+    }
 
 
 def forget_session_cookie(*, credential_store: CredentialStore | None = None) -> dict[str, object]:

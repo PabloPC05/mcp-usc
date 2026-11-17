@@ -16,6 +16,14 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### Cerrar sesión de verdad y sesiones sin llavero
+
+- `end_campus_session` cierra la sesión en el propio Campus (`login/logout.php` con su sesskey),
+  así que esa cookie deja de valer en cualquier sitio, y después la olvida en este equipo;
+- sin llavero del sistema (un Linux sin escritorio, una VM por SSH), la sesión se guarda en un
+  archivo privado (0600, carpeta 0700) en la configuración del usuario, en vez de fallar;
+  `USC_CREDENTIALS_FILE` cambia su ruta.
+
 ### Editar una entrega que ya está en el límite de archivos
 
 - con la tarea en su máximo de archivos, Moodle esconde «Engadir» hasta que hay sitio, así que
