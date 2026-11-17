@@ -16,6 +16,18 @@ ampliar el contrato y cualquier cambio incompatible debe explicarse expresamente
 - `USC_CACHE_DIR` cambia la carpeta de estas cachés, y `USC_LOCATION_CACHE=0` y
   `USC_TIMETABLE_DISCOVERY_CACHE=0` las desactivan.
 
+### Notas, foros, cuestionarios y mensajes con la sesión de alumno
+
+- con la sesión HTTP, la USC no expone por AJAX las notas, la lista de debates de un foro ni los
+  intentos de un cuestionario; nuevas lecturas confirmadas de sus páginas (`inspect_my_grades`,
+  `inspect_forum_discussions`, `inspect_quiz_page`), que dejan la misma visita que abrirlas en la
+  web, leídas por `campus_pages.py`;
+- los mensajes de foro de Moodle 4 traen fecha, a qué responden y si están leídos
+  (`timecreated`, `parentid`, `unread`), y su texto conserva los párrafos;
+- los mensajes privados dicen bien si están leídos (Moodle 4 guarda la lectura aparte y ahora
+  se pregunta con su propio filtro), traen el destinatario de los enviados y se pueden leer por
+  persona con `conversation_with`; `message_member_names` da los nombres.
+
 ### El Campus completo, sin cortes
 
 - el Timeline se pide por páginas (Moodle da 50 eventos por llamada): `list_pending_work` y
