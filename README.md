@@ -1,5 +1,18 @@
 # mcp-usc
 
+> **Este repositorio se ha unido al monorepo [campus-usc](https://github.com/PabloPC05/campus-usc).**
+>
+> El proyecto vive ahora en un solo sitio, con los nombres ordenados:
+> el **motor** (la biblioteca que habla con el Campus) es
+> [`campus-usc-core`](https://github.com/PabloPC05/campus-usc/tree/main/core) y ya no se llama
+> «mcp-usc»; el **servidor MCP** es
+> [`campus-usc/mcp`](https://github.com/PabloPC05/campus-usc/tree/main/mcp); el **CLI** `campus`
+> está en la raíz. Para el servidor MCP, instala desde el monorepo:
+> `uv tool install "mcp-usc @ https://github.com/PabloPC05/campus-usc/archive/refs/heads/main.zip#subdirectory=mcp"`.
+>
+> Lo que aquí se instaló con un commit fijo (lisa, Codex) sigue funcionando; actualízalo al
+> monorepo cuando quieras.
+
 [![CI](https://github.com/PabloPC05/mcp-usc/actions/workflows/ci.yml/badge.svg)](https://github.com/PabloPC05/mcp-usc/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
