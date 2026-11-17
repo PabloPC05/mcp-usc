@@ -48,6 +48,36 @@ def html_to_text(value: str | None, *, limit: int = 8_000) -> str:
     return _WHITESPACE.sub(" ", text).strip()[:limit]
 
 
+_BLOCKS = ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre")
+
+
+def html_to_paragraphs(value: str | None, *, limit: int = 8_000) -> str:
+    """Like :func:`html_to_text`, but each paragraph, line break or list item on its own line."""
+
+    if not value:
+        return ""
+    if "<" not in value:
+        lines = html.unescape(value).splitlines()
+    else:
+        soup = BeautifulSoup(value, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+        for tag in soup.find_all(_BLOCKS):
+            if tag.name == "li":
+                tag.insert_before("\n• ")
+            else:
+                tag.insert_before("\n")
+            if tag.name != "br":
+                tag.insert_after("\n")
+        lines = html.unescape(soup.get_text("")).splitlines()
+    out: list[str] = []
+    for line in lines:
+        clean = _WHITESPACE.sub(" ", line).strip()
+        if clean or (out and out[-1]):
+            out.append(clean)
+    return "\n".join(out).strip()[:limit]
+
+
 def redact_secret(message: str, *secrets: str | None) -> str:
     redacted = message
     for secret in secrets:

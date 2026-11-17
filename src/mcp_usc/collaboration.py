@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, TypeAlias
 from zoneinfo import ZoneInfo
 
-from .security import UnsafeUrlError, html_to_text, validate_usc_url
+from .security import UnsafeUrlError, html_to_paragraphs, html_to_text, validate_usc_url
 
 Invoke: TypeAlias = Callable[[str, Mapping[str, Any]], Awaitable[Any]]
 
@@ -145,6 +145,7 @@ def _normalise_message(message: Mapping[str, Any]) -> dict[str, Any]:
             message.get("conversationid") or message.get("conversation_id")
         ),
         "user_id_from": _integer(message.get("useridfrom") or message.get("userfrom")),
+        "user_id_to": _integer(message.get("useridto") or message.get("userto")),
         "text": _text(
             message.get("text")
             or message.get("fullmessage")
@@ -260,8 +261,33 @@ async def list_messages(
         },
     )
     messages = _mapping_items(payload, "messages")
+    normalised = [_normalise_message(item) for item in messages[:limit]]
+    # Moodle 4 keeps a message's read state apart (timeread stays empty), so the only
+    # reliable answer is the filter itself: ask which of these are unread.
+    if read_status in {"read", "unread"}:
+        for item in normalised:
+            item["is_read"] = read_status == "read"
+    elif normalised:
+        unread = await invoke(
+            "core_message_get_messages",
+            {
+                "useridto": user_id if direction == "received" else 0,
+                "useridfrom": user_id if direction == "sent" else 0,
+                "type": message_type,
+                "read": 0,
+                "newestfirst": bool(newest),
+                "limitfrom": 0,
+                "limitnum": 50,
+            },
+        )
+        unread_ids = {
+            _integer(item.get("id") or item.get("messageid"))
+            for item in _mapping_items(unread, "messages")
+        }
+        for item in normalised:
+            item["is_read"] = item["message_id"] not in unread_ids
     return _page_result(
-        [_normalise_message(item) for item in messages[:limit]],
+        normalised,
         offset=offset,
         limit=limit,
         warnings=_warnings(payload),
@@ -461,14 +487,19 @@ def _normalise_post(post: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "post_id": _integer(post.get("id") or post.get("postid")),
         "discussion_id": _integer(post.get("discussion") or post.get("discussionid")),
-        "parent_post_id": _integer(post.get("parent")),
+        # Moodle 4's mod_forum_get_discussion_posts says parentid/timecreated/unread.
+        "parent_post_id": _integer(post.get("parent") or post.get("parentid")),
         "subject": _text(post.get("subject"), limit=1_000),
-        "message": _text(post.get("message")),
+        "message": html_to_paragraphs(str(post.get("message") or ""), limit=MAX_TEXT_LENGTH),
         "author": _text(post.get("userfullname") or author_name, limit=500),
         "author_user_id": _integer(post.get("userid") or author_id),
-        "created_at": _timestamp(post.get("created")),
-        "modified_at": _timestamp(post.get("modified")),
-        "is_read": bool(post.get("postread") or post.get("isread")),
+        "created_at": _timestamp(post.get("created") or post.get("timecreated")),
+        "modified_at": _timestamp(post.get("modified") or post.get("timemodified")),
+        "is_read": (
+            not post["unread"]
+            if isinstance(post.get("unread"), bool)
+            else bool(post.get("postread") or post.get("isread"))
+        ),
         "attachments": attachments,
         "attachments_truncated": (
             isinstance(post.get("attachments"), list)

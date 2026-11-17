@@ -592,6 +592,23 @@ class MoodleSessionForms:
             "security_note": SECURITY_NOTE,
         }
 
+    _READ_PAGES = frozenset(
+        {
+            "/grade/report/overview/index.php",
+            "/grade/report/user/index.php",
+            "/mod/forum/view.php",
+            "/mod/quiz/view.php",
+        }
+    )
+
+    async def read_page(self, path: str, params: Mapping[str, Any]) -> FormResponse:
+        """GET one of the read-only Campus pages that have no AJAX function at the USC."""
+
+        if path not in self._READ_PAGES:
+            raise SessionFormValidationError("Esa página del Campus no está permitida")
+        clean = {key: value for key, value in params.items() if value is not None}
+        return await self._get(f"{self.base_url}{path}", clean)
+
     async def assignment_status(self, course_module_id: int) -> dict[str, Any]:
         """The «Estado da entrega» table of the assignment page, as label → value.
 

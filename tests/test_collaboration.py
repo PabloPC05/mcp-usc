@@ -174,9 +174,43 @@ async def test_lists_messages_without_conversation_bootstrap_side_effect() -> No
                 "limitfrom": 3,
                 "limitnum": 25,
             },
-        )
+        ),
+        # Moodle 4 keeps read state apart: the unread filter says which are unread.
+        (
+            "core_message_get_messages",
+            {
+                "useridto": 5,
+                "useridfrom": 0,
+                "type": "conversations",
+                "read": 0,
+                "newestfirst": True,
+                "limitfrom": 0,
+                "limitnum": 50,
+            },
+        ),
     ]
     assert result["items"][0]["text"] == "Aviso seguro"
+    assert result["items"][0]["is_read"] is False  # it came back as unread
+
+
+async def test_messages_read_state_comes_from_moodles_filter() -> None:
+    message = {"id": 21, "useridfrom": 8, "text": "Ola", "timecreated": 1_800_000_000}
+
+    class TwoAnswers:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def __call__(self, function: str, arguments: dict) -> dict:
+            self.calls.append(arguments)
+            if arguments["read"] == 0:  # nothing unread
+                return {"messages": []}
+            return {"messages": [message]}
+
+    invoke = TwoAnswers()
+    result = await list_messages(invoke, user_id=5, read_status="all")
+    assert result["items"][0]["is_read"] is True
+    only_read = await list_messages(invoke, user_id=5, read_status="read")
+    assert only_read["items"][0]["is_read"] is True
 
 
 async def test_lists_all_forums_and_applies_bounded_local_pagination() -> None:

@@ -1395,7 +1395,10 @@ class HttpSessionMoodleGateway(CampusGateway):
         allowed_paths = frozenset(
             {
                 "/course/view.php",
+                "/grade/report/overview/index.php",
+                "/grade/report/user/index.php",
                 "/mod/assign/view.php",
+                "/mod/forum/view.php",
                 "/mod/quiz/attempt.php",
                 "/mod/quiz/processattempt.php",
                 "/mod/quiz/startattempt.php",

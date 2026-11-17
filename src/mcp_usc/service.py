@@ -45,6 +45,12 @@ from .campus import (
     CampusProtocolError,
     create_campus_gateway,
 )
+from .campus_pages import (
+    parse_forum_page,
+    parse_grade_overview,
+    parse_grade_report,
+    parse_quiz_page,
+)
 from .class_timetables import UscClassTimetableClient
 from .collaboration import (
     list_conversation_messages as moodle_list_conversation_messages,
@@ -126,7 +132,7 @@ from .quizzes import SECURITY_NOTE as QUIZ_SECURITY_NOTE
 from .quizzes import MoodleQuizClient
 from .resource_references import issue_resource_reference, resolve_resource_reference
 from .resource_text import extract_resource_text
-from .security import html_to_text
+from .security import html_to_paragraphs, html_to_text
 from .session_course_state import (
     fetch_session_course_states,
     session_assignments,
@@ -1914,6 +1920,169 @@ class UscService:
             }
         result["stateful_inspection_confirmed"] = True
         return result
+
+    async def _read_campus_page(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        confirmation_token: str | None,
+        *,
+        path: str,
+        params: dict[str, Any],
+        parse: Any,
+        warning: str,
+    ) -> dict[str, Any]:
+        """Pages with no AJAX function at the USC: preview first, then one confirmed visit."""
+
+        gateway = self._campus()
+        forms = _session_form_client(gateway)
+        if forms is None:
+            raise CampusCapabilityUnavailable(
+                "Esta lectura usa la página del Campus y solo existe con la sesión HTTP; con un "
+                "token REST usa las funciones de Moodle."
+            )
+        if confirmation_token is None:
+            confirmation = await _issue_action_confirmation(gateway, action, payload)
+            return {"preview": True, "stateful_read": True, "warning": warning, **confirmation}
+        await _consume_action_confirmation(gateway, confirmation_token, action, payload)
+        response = await forms.read_page(path, params)
+        return {**parse(response.text), "stateful_read_confirmed": True}
+
+    async def inspect_my_grades(
+        self, course_id: int | None, confirmation_token: str | None
+    ) -> dict[str, Any]:
+        """«Cualificacións»: every course's total, or one course's items with feedback."""
+
+        if course_id is not None and (isinstance(course_id, bool) or course_id <= 0):
+            raise ValueError("course_id debe ser un entero positivo")
+        if course_id is None:
+            return await self._read_campus_page(
+                "grades.overview_page",
+                {"course_id": None},
+                confirmation_token,
+                path="/grade/report/overview/index.php",
+                params={},
+                parse=lambda html: {"courses": parse_grade_overview(html)},
+                warning=(
+                    "Abrirá «Cualificacións» una vez, como en la web: Moodle registra la visita."
+                ),
+            )
+        return await self._read_campus_page(
+            "grades.user_page",
+            {"course_id": course_id},
+            confirmation_token,
+            path="/grade/report/user/index.php",
+            params={"id": course_id},
+            parse=lambda html: {"course_id": course_id, **parse_grade_report(html)},
+            warning="Abrirá el informe de notas de la materia una vez: Moodle registra la visita.",
+        )
+
+    async def inspect_forum_discussions(
+        self, course_module_id: int, page: int, confirmation_token: str | None
+    ) -> dict[str, Any]:
+        """A forum's discussions as its page lists them (opening it records a forum view)."""
+
+        if isinstance(course_module_id, bool) or course_module_id <= 0 or page < 0:
+            raise ValueError("course_module_id o page no son válidos")
+        return await self._read_campus_page(
+            "forum.discussions_page",
+            {"course_module_id": course_module_id, "page": page},
+            confirmation_token,
+            path="/mod/forum/view.php",
+            params={"id": course_module_id, "p": page or None},
+            parse=lambda html: {"course_module_id": course_module_id, **parse_forum_page(html)},
+            warning=(
+                "Abrirá la página del foro una vez, como en la web: Moodle registra la visita al "
+                "foro, pero no marca ningún mensaje como leído."
+            ),
+        )
+
+    async def inspect_quiz_page(
+        self, course_module_id: int, confirmation_token: str | None
+    ) -> dict[str, Any]:
+        """A quiz's dates, limits, your attempts and grade (opening it records a view)."""
+
+        if isinstance(course_module_id, bool) or course_module_id <= 0:
+            raise ValueError("course_module_id debe ser un entero positivo")
+        return await self._read_campus_page(
+            "quiz.summary_page",
+            {"course_module_id": course_module_id},
+            confirmation_token,
+            path="/mod/quiz/view.php",
+            params={"id": course_module_id},
+            parse=lambda html: {"course_module_id": course_module_id, **parse_quiz_page(html)},
+            warning=(
+                "Abrirá la página del cuestionario una vez, como en la web: Moodle registra la "
+                "visita, pero no empieza ningún intento."
+            ),
+        )
+
+    async def conversation_with(self, other_user_id: int, limit: int = 50) -> dict[str, Any]:
+        """Your private conversation with one person, newest last; reading marks nothing."""
+
+        if isinstance(other_user_id, bool) or other_user_id <= 0 or not 1 <= limit <= 100:
+            raise ValueError("other_user_id o limit no son válidos")
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        raw = await gateway.invoke(
+            "core_message_get_conversation_between_users",
+            {
+                "userid": user_id,
+                "otheruserid": other_user_id,
+                "includecontactrequests": False,
+                "includeprivacyinfo": False,
+                "memberlimit": 0,
+                "memberoffset": 0,
+                "messagelimit": limit,
+                "messageoffset": 0,
+                "newestmessagesfirst": True,
+            },
+        )
+        conversation = raw if isinstance(raw, dict) else {}
+        members = {
+            int(member["id"]): html_to_text(str(member.get("fullname") or ""), limit=200)
+            for member in conversation.get("members") or []
+            if isinstance(member, dict) and member.get("id")
+        }
+        messages = [
+            {
+                "message_id": int(message.get("id") or 0),
+                "from_me": int(message.get("useridfrom") or 0) == user_id,
+                "author": members.get(int(message.get("useridfrom") or 0), ""),
+                "text": html_to_paragraphs(str(message.get("text") or ""), limit=8_000),
+                "created_at": int(message.get("timecreated") or 0) or None,
+            }
+            for message in conversation.get("messages") or []
+            if isinstance(message, dict)
+        ]
+        messages.sort(key=lambda message: message["created_at"] or 0)
+        return {
+            "conversation_id": conversation.get("id"),
+            "other_user_id": other_user_id,
+            "other_name": members.get(other_user_id, ""),
+            "messages": messages,
+            "unread": int(conversation.get("unreadcount") or 0),
+            "content_is_untrusted": True,
+        }
+
+    async def message_member_names(self, user_ids: list[int]) -> dict[int, str]:
+        """Names of the people in your messages (Moodle's messaging member info)."""
+
+        wanted = sorted({int(value) for value in user_ids if int(value) > 0})[:100]
+        if not wanted:
+            return {}
+        gateway = self._campus()
+        user_id = await _gateway_user_id(gateway)
+        members = await gateway.invoke(
+            "core_message_get_member_info",
+            {"referenceuserid": user_id, "userids": wanted},
+        )
+        names: dict[int, str] = {}
+        for member in members if isinstance(members, list) else []:
+            if isinstance(member, dict) and member.get("id"):
+                name = html_to_text(str(member.get("fullname") or ""), limit=200)
+                names[int(member["id"])] = name
+        return names
 
     async def list_course_contents(
         self,
