@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import keyring
-from keyring.errors import KeyringError, NoKeyringError
+from keyring.errors import InitError, KeyringError, KeyringLocked, NoKeyringError
 from platformdirs import user_config_path
 
 from .request_credentials import current_moodle_session
@@ -21,6 +21,11 @@ _ENVIRONMENT_CREDENTIALS = {
 
 class CredentialStoreError(RuntimeError):
     pass
+
+
+# No keyring at all, one that cannot start, or one locked with no screen to unlock it
+# (Ubuntu Server with a leftover GNOME keyring): all mean «use the private file».
+_UNUSABLE = (NoKeyringError, KeyringLocked, InitError)
 
 
 def fallback_path() -> Path:
@@ -82,7 +87,7 @@ class CredentialStore:
                 return environment_value
         try:
             value = keyring.get_password(self.service_name, name)
-        except NoKeyringError:
+        except _UNUSABLE:
             return _read_fallback().get(name)
         except KeyringError as exc:
             raise CredentialStoreError(
@@ -95,7 +100,7 @@ class CredentialStore:
             raise ValueError("No se puede guardar una credencial vacía")
         try:
             keyring.set_password(self.service_name, name, value)
-        except NoKeyringError:
+        except _UNUSABLE:
             values = _read_fallback()
             values[name] = value
             try:
@@ -116,7 +121,7 @@ class CredentialStore:
             _write_fallback(values)
         try:
             keyring.delete_password(self.service_name, name)
-        except (keyring.errors.PasswordDeleteError, NoKeyringError):
+        except (keyring.errors.PasswordDeleteError, *_UNUSABLE):
             return
         except KeyringError as exc:
             raise CredentialStoreError(

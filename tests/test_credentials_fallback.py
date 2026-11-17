@@ -8,7 +8,7 @@ import stat
 import httpx
 import pytest
 import respx
-from keyring.errors import NoKeyringError
+from keyring.errors import KeyringLocked, NoKeyringError
 
 from mcp_usc import credentials
 from mcp_usc.credentials import CredentialStore
@@ -16,10 +16,10 @@ from mcp_usc.session_auth import SESSION_CREDENTIAL_NAME, end_campus_session
 from mcp_usc.settings import Settings
 
 
-@pytest.fixture
-def no_keyring(tmp_path, monkeypatch):
+@pytest.fixture(params=[NoKeyringError, KeyringLocked])
+def no_keyring(request, tmp_path, monkeypatch):
     def fail(*args, **kwargs):
-        raise NoKeyringError("no backend")
+        raise request.param("no usable keyring")  # none, or locked with no screen
 
     monkeypatch.setattr(credentials.keyring, "get_password", fail)
     monkeypatch.setattr(credentials.keyring, "set_password", fail)
