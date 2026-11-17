@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,64 @@ def test_helium_is_found_on_a_mac(monkeypatch, tmp_path):
 
     monkeypatch.setattr(system_browser.Path, "exists", exists)
     assert system_browser.find_browser() == ("helium", str(app))
+
+
+async def test_a_closing_browser_is_not_killed_before_it_saves(tmp_path, monkeypatch):
+    """After the login, Browser.close and then wait: killing it would lose the cookies."""
+
+    calls = []
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            calls.append("wait")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            calls.append("terminate")
+
+    process = Process()
+
+    async def fake_exec(*args, **kwargs):
+        return process
+
+    class Socket:
+        sent = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, text):
+            self.sent.append(json.loads(text))
+
+        async def recv(self):
+            message = self.sent[-1]
+            result = {}
+            if message["method"] == "Target.getTargets":
+                result = {"targetInfos": []}
+            if message["method"] == "Storage.getCookies":
+                result = {
+                    "cookies": [{"name": "MoodleSession", "value": "s", "domain": "cv.usc.es"}]
+                }
+            return json.dumps({"id": message["id"], "result": result})
+
+    async def authenticated(settings, value):
+        return True
+
+    async def port_file(profile, process):
+        return 1, "/x"
+
+    monkeypatch.setattr(system_browser.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(system_browser, "_port_file", port_file)
+    monkeypatch.setattr("websockets.connect", lambda *a, **k: Socket())
+    monkeypatch.setattr("mcp_usc.campus._cookie_is_authenticated", authenticated)
+    value = await system_browser.capture_session(
+        _settings(tmp_path), headless=True, timeout=5, browser=("chrome", "/x")
+    )
+    assert value == "s"
+    assert calls == ["wait"]  # it closed by itself: never terminated
